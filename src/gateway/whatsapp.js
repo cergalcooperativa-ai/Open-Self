@@ -546,10 +546,17 @@ export class WhatsAppGateway {
       }
 
       if (result.action === 'reply' && result.replies.length > 0) {
-        const readDelay = Math.min(result.delay * 0.3, 5000);
-        const typingTime = Math.min(result.replies[0].length * 60, 4000);
+        // Natural human delay: notice + read message before typing.
+        // Fast mode (testing): OPENSELF_FAST_REPLY=1 uses 2-4s.
+        // Normal mode (production human mimicry): 10s to 30s.
+        const isFast = process.env.OPENSELF_FAST_REPLY === '1';
+        const minRead = isFast ? 1000 : (Number(process.env.OPENSELF_MIN_DELAY) || 10000);
+        const maxRead = isFast ? 3000 : (Number(process.env.OPENSELF_MAX_DELAY) || 28000);
+        const rawDelay = typeof result.delay === 'number' && result.delay > 0 ? result.delay * 0.25 : 12000;
+        const readDelay = Math.min(Math.max(rawDelay, minRead), maxRead);
+        const typingTime = Math.min(Math.max(result.replies[0].length * 90, 1500), 5000);
         const totalDelaySec = ((readDelay + typingTime) / 1000).toFixed(1);
-        console.log(chalk.cyan(`   [MIMICRY] Aguardando ${totalDelaySec}s antes de responder...`));
+        console.log(chalk.cyan(`   [MIMICRY] Aguardando ${totalDelaySec}s antes de responder (${(readDelay/1000).toFixed(1)}s leitura + ${(typingTime/1000).toFixed(1)}s digitando)...`));
 
         await this.sleep(readDelay);
 
@@ -562,8 +569,8 @@ export class WhatsAppGateway {
         for (let i = 0; i < result.replies.length; i++) {
           await this.sock.presenceSubscribe(msg.key.remoteJid);
           await this.sock.sendPresenceUpdate('composing', msg.key.remoteJid);
-          const typingTime = Math.min(result.replies[i].length * 60, 4000);
-          await this.sleep(typingTime);
+          const currentTypingTime = Math.min(Math.max(result.replies[i].length * 90, 1500), 5000);
+          await this.sleep(currentTypingTime);
           await this.sock.sendPresenceUpdate('paused', msg.key.remoteJid);
 
           const sent = await this.sock.sendMessage(msg.key.remoteJid, { text: result.replies[i] });
@@ -576,7 +583,7 @@ export class WhatsAppGateway {
           console.log(chalk.green('   -> ' + replyPreview));
 
           if (i < result.replies.length - 1) {
-            await this.sleep(1000 + Math.random() * 2000);
+            await this.sleep(3000 + Math.random() * 3000);
           }
         }
 
