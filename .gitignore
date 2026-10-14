@@ -99,3 +99,15 @@ ck.md
 
 # AI assistant artifacts
 .devin/
+
+# OpenSelf clone runtime (segredos / dados de terceiros) — nunca commitar
+data/
+whatsapp-session*/
+memory-index/
+contacts.json
+trigger-states.json
+review-queue.json
+RESPONSES_DISABLED
+*.bak
+*.bak-*
+*.orig

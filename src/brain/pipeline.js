@@ -88,7 +88,15 @@ export class ClonePipeline {
         // 6. Safety check
         const safetyResult = this.guard.checkReply(cleanReply, message, contact);
 
-        if (!safetyResult.safe) {
+        // contact.autoSend = chat explicitly activated by the owner: no review-queue, the guard
+        // only observes — except disguise/secret leaks, which abort the send silently.
+        if (
+            contact.autoSend &&
+            (safetyResult.issues || []).some((i) => i.type === 'ai_reveal' || i.type === 'secret_leak')
+        ) {
+            return { action: 'suppressed', replies: [], delay: 0, issues: safetyResult.issues };
+        }
+        if (!safetyResult.safe && !contact.autoSend) {
             if (safetyResult.action === 'deflect') {
                 // Use deflection message
                 cleanReply = safetyResult.deflectMessage;

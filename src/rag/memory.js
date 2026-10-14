@@ -90,10 +90,21 @@ export class ChatMemory {
         // vectra's queryItems is (vector, query, topK, ...): the query string feeds
         // the optional BM25 keyword component; pass the message so topK stays the
         // third arg. Omitting it silently returns no results (topK lands undefined).
-        const results = await this.index.queryItems(vector, message, topK * 2); // Fetch extra for filtering
+        const results = await this.index.queryItems(vector, message, topK * 4); // Fetch extra for filtering
+
+        // Isolation per contact: memories from the SAME chat only.
+        // Cross-chat leakage would mix each relationship's unique style/context.
+        // Unknown contact => NO memories (better no context than wrong context).
+        // FN-1 fix: normaliza '~Nome' (export) vs pushName (live) nos dois lados
+        const norm = (x) => String(x).replace(/^[~\s]+/, '').trim();
+        const wanted = norm(contact);
+        const sameContact = results.filter(
+            (r) => contact && norm(r.item.metadata.contact) === wanted,
+        );
+        const pool = sameContact;
 
         // Score and rank results
-        const scored = results.map((r) => {
+        const scored = pool.map((r) => {
             let score = r.score;
 
             // Boost conversations with the same contact (+20%)

@@ -135,7 +135,12 @@ export class LocalEmbedding {
  * Auto-detect embedding provider
  */
 export function createEmbedding(config = {}) {
-    if (config.provider === 'local' || !process.env.OPENAI_API_KEY) {
+    // Groq (OpenAI-compatible chat) tem API de embeddings incompleta:
+    // rejeita o param 'dimensions'. Força embedding local TF-IDF offline
+    // quando o baseURL aponta pra Groq (ou quando não há key OpenAI real).
+    const baseURL = String(config.baseURL || process.env.OPENAI_BASE_URL || '');
+    const isGroq = /groq\.com/.test(baseURL);
+    if (config.provider === 'local' || isGroq || !process.env.OPENAI_API_KEY) {
         return new LocalEmbedding();
     }
     return new OpenAIEmbedding(config);

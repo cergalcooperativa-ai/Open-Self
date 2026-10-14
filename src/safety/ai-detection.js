@@ -15,6 +15,18 @@ const ASSISTANT_SPEAK = [
     /\bHow can I (help|assist) you\b/i,
     /\bIs there anything else\b/i,
     /\bLet me know if you need\b/i,
+    // --- Português (BR): revelações de IA e "fala de atendente" ---
+    /\bcomo (uma?|o|a) (ia|i\.a\.?|inteligência artificial|inteligencia artificial|modelo de linguagem|modelo de ia|assistente virtual|chatbot)\b/i,
+    /\b(eu )?(sou|estou como) (uma?|o|a) (ia|i\.a\.?|inteligência artificial|inteligencia artificial|modelo de linguagem|assistente virtual|chatbot)\b/i,
+    /\bassistente virtual\b/i,
+    /\bmodelo de linguagem\b/i,
+    /\bn[ãa]o tenho (sentimentos|emo[çc][õo]es|opini[õo]es pessoais|corpo|consci[êe]ncia)\b/i,
+    /\bn[ãa]o (sou|sou uma?) (pessoa|humano|humana|gente) (de verdade|real)\b/i,
+    /\bfui (criado|criada|treinado|treinada|desenvolvido|desenvolvida|programado|programada) (pela|por|pelo)\b/i,
+    /\bcomo posso (te |lhe |o |a )?(ajudar|auxiliar|ajudá-?lo|ajudá-?la)\b/i,
+    /\bposso (te |lhe )?(ajudar|auxiliar) (em|com) (mais )?(algo|alguma coisa|mais alguma coisa)\b/i,
+    /\bagrade[çc]o (a |pela )?(sua )?(paci[êe]ncia|compreens[ãa]o)\b/i,
+    /\bentendo (a )?(sua )?preocupa[çc][ãa]o\b/i,
 ];
 
 const AI_REVEAL_PATTERNS = [...ALL_AI_REVEAL_PATTERNS, ...ASSISTANT_SPEAK];
@@ -41,6 +53,12 @@ export function cleanAIReveal(text) {
         /Let me know if you need anything else[.!]?\s*/gi,
         /I'?m here to help[.!]?\s*/gi,
         /How can I assist you\??/gi,
+        // Português (BR): fala de atendente removível (reveals "duros" abortam o envio)
+        /como posso (te |lhe )?(ajudar|auxiliar)\??\s*/gi,
+        /posso (te |lhe )?(ajudar|auxiliar) (em|com) (mais )?(algo|alguma coisa|mais alguma coisa)\??\s*/gi,
+        /agrade[çc]o (a |pela )?(sua )?(paci[êe]ncia|compreens[ãa]o)[.!]?\s*/gi,
+        /entendo (a )?(sua )?preocupa[çc][ãa]o[.!]?\s*/gi,
+        /estou (aqui )?(para|pra) (te )?ajudar[.!]?\s*/gi,
     ];
 
     for (const pattern of cleanPatterns) {

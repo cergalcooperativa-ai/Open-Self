@@ -10,7 +10,40 @@ export class ConversationMemory {
     constructor(dataDir = './data') {
         this.dataDir = dataDir;
         this.memoryFile = join(dataDir, 'memory.md');
+        this.sessionsFile = join(dataDir, 'conversation-sessions.json');
+        // modo teste: E2E/debug nao polui o historico real do operator
+        this.persist = process.env.OPENSELF_NO_PERSIST !== '1';
         this.sessions = new Map(); // In-memory per-contact sessions
+        this._loadSessions();
+    }
+
+    /**
+     * Reload persisted sessions (survives gateway restarts — the clone
+     * keeps live-conversation context after any restart)
+     */
+    _loadSessions() {
+        try {
+            if (existsSync(this.sessionsFile)) {
+                const data = JSON.parse(readFileSync(this.sessionsFile, 'utf-8'));
+                for (const [contact, exchanges] of Object.entries(data)) {
+                    this.sessions.set(contact, exchanges);
+                }
+            }
+        } catch {
+            // arquivo corrompido: comeca limpo (nao derruba o gateway)
+        }
+    }
+
+    _saveSessions() {
+        // sessions.json = CONTEXTO OPERACIONAL: grava sempre (sobrevive a
+        // restart). OPENSELF_NO_PERSIST controla apenas o log de auditoria.
+        try {
+            const obj = {};
+            for (const [contact, exs] of this.sessions) obj[contact] = exs;
+            writeFileSync(this.sessionsFile, JSON.stringify(obj), 'utf-8');
+        } catch {
+            // non-critical
+        }
     }
 
     /**
@@ -33,8 +66,10 @@ export class ConversationMemory {
             session.splice(0, session.length - 20);
         }
 
-        // Persist to memory.md
-        this._appendToFile(contact, theirMessage, cloneReply);
+        // Persist sessions (contexto vivo p/ proximas respostas e restarts)
+        this._saveSessions();
+        // Persist to memory.md (log de auditoria)
+        if (this.persist) this._appendToFile(contact, theirMessage, cloneReply);
     }
 
     /**

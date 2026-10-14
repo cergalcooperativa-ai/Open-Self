@@ -10,9 +10,10 @@ import { parseGeneric } from '../parsers/generic.js';
 import { extractPersonality } from '../personality/extractor.js';
 import { createFingerprint } from '../personality/fingerprint.js';
 import { generateSoulMd, saveSoulMd } from '../personality/soul-generator.js';
-import { ChatMemory } from '../rag/memory.js';
-import { createEmbedding } from '../rag/embeddings.js';
+// Mesmo store que o gateway le (data/memory-index/vectors.json + metadata.json)
+import { ChatMemory } from '../memory/rag.js';
 import inquirer from 'inquirer';
+import { writeFileSync, existsSync, readFileSync } from 'fs';
 
 export async function feedCommand(options) {
     console.log('');
@@ -167,12 +168,22 @@ export async function feedCommand(options) {
             name: userName,
             contacts: contactMap,
         });
-        const soulPath = saveSoulMd(soulContent);
-        spinnerSoul.succeed(`SOUL.md generated at ${chalk.cyan(soulPath)}`);
+        // Preserva SOUL.md curado manualmente: se ja existe, a versao nova
+        // vai para SOUL.auto.md; ajustes manuais de idioma/limites/relacionamentos
+        // nao sao mais apagados por novos feeds.
+        let soulPath;
+        if (existsSync('./data/SOUL.md')) {
+            writeFileSync('./data/SOUL.auto.md', soulContent, 'utf-8');
+            soulPath = './data/SOUL.auto.md';
+            spinnerSoul.succeed('SOUL.auto.md regenerated (curated SOUL.md preserved)');
+        } else {
+            soulPath = saveSoulMd(soulContent);
+            spinnerSoul.succeed(`SOUL.md generated at ${chalk.cyan(soulPath)}`);
+        }
 
         // Save conversations for clone testing
         const conversationsForTest = conversations.slice(0, 100); // Keep top 100
-        const { writeFileSync, mkdirSync, existsSync } = await import('fs');
+        const { mkdirSync } = await import('fs');
         const dataDir = './data';
         if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
         writeFileSync(
@@ -189,16 +200,57 @@ export async function feedCommand(options) {
             'utf-8',
         );
 
+        // Per-contact style profiles: each conversation has its own register.
+        // Derives tone/length signature per contact from the actual chats.
+        const perContact = {};
+        for (const [name, info] of Object.entries(contactMap)) {
+            const convs = conversations.filter((c) => c.contact === name);
+            if (!convs.length) continue;
+            const replies = convs.map((c) => c.yourReply || '');
+            const avgWords =
+                replies.reduce((a, r) => a + r.split(/\s+/).filter(Boolean).length, 0) /
+                replies.length;
+            const words = {};
+            for (const r of replies) {
+                for (const w of r.toLowerCase().match(/\p{L}{3,}/gu) || []) {
+                    words[w] = (words[w] || 0) + 1;
+                }
+            }
+            const topWords = Object.entries(words)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 15)
+                .map(([w]) => w);
+            perContact[name] = {
+                messageCount: info.messageCount,
+                relationship: info.relationship || 'Contact',
+                avgReplyWords: Math.round(avgWords * 10) / 10,
+                topWordsWithThisContact: topWords,
+                rules: `Fale com ${name} do mesmo jeito que você fala nos exemplos. Vocabulário típico com ${name}: ${topWords.slice(0, 10).join(', ')}. Média de ${Math.round(avgWords)} palavras por resposta.`,
+            };
+        }
+        // merge: preserva perfis de contatos de feeds anteriores
+        let existingContacts = {};
+        try {
+            existingContacts = JSON.parse(readFileSync(`${dataDir}/contacts.json`, 'utf-8'));
+        } catch {
+            // primeiro feed — arquivo não existe ainda
+        }
+        writeFileSync(
+            `${dataDir}/contacts.json`,
+            JSON.stringify({ ...existingContacts, ...perContact }, null, 2),
+            'utf-8',
+        );
+
         // RAG indexing — auto-index conversations for memory
         if (conversations.length > 0) {
             const spinnerRAG = ora('Indexing memories for RAG search...').start();
             try {
-                const embedding = createEmbedding();
-                const memory = new ChatMemory(embedding, dataDir);
-                const indexed = await memory.indexHistory(conversations);
-                const stats = await memory.getStats();
+                const memory = new ChatMemory(dataDir);
+                const before = (await memory.init(), memory.metadata.length);
+                await memory.indexHistory(conversations, { dedupe: true });
+                const stats = memory.getStats();
                 spinnerRAG.succeed(
-                    `Indexed ${chalk.cyan(indexed)} memories for RAG search (${chalk.gray(stats.totalMemories + ' total')})`,
+                    `Indexed ${chalk.cyan(stats.totalMemories - before)} new memories for RAG search (${chalk.gray(stats.totalMemories + ' total')})`,
                 );
             } catch (err) {
                 spinnerRAG.warn(`RAG indexing skipped: ${err.message}`);
