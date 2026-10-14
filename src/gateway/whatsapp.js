@@ -323,9 +323,9 @@ export class WhatsAppGateway {
     }
 
     // Owner's explicit trigger (" .") is sovereign over ghost mode's inactivity timer.
-    // Only the online-hours schedule (SOUL.md online_hours, default 08:00-23:00) applies;
-    // the human-like delays come from HumanMimicry / the typing simulation below.
-    if (!this.isWithinOnlineHours()) {
+    // By default, the owner's manual activation has absolute sovereignty even during nighttime.
+    // Only if OPENSELF_ENFORCE_ONLINE_HOURS === '1' or 'true' will it enforce the schedule.
+    if ((process.env.OPENSELF_ENFORCE_ONLINE_HOURS === '1' || process.env.OPENSELF_ENFORCE_ONLINE_HOURS === 'true') && !this.isWithinOnlineHours()) {
       this.stats.ignored++;
       console.log(chalk.gray('   [HORARIO] fora do online_hours - ' + normalizedSender + ' aprendeu, nao responde'));
       return;
@@ -463,14 +463,18 @@ export class WhatsAppGateway {
 
     try {
       if (this.pipeline && this.pipeline.brain) {
-        const response = await this.pipeline.brain.generate(
-          'Voce e um analista de personalidade. Responda apenas em JSON valido.',
-          prompt
-        );
-        const start = String(response).indexOf('{');
-        const end = String(response).lastIndexOf('}');
-        if (start === -1 || end <= start) throw new Error('resposta sem JSON');
-        return JSON.parse(String(response).slice(start, end + 1));
+        const fn = this.pipeline.brain.chat || this.pipeline.brain.generate;
+        if (typeof fn === 'function') {
+          const response = await fn.call(
+            this.pipeline.brain,
+            'Voce e um analista de personalidade. Responda apenas em JSON valido.',
+            prompt
+          );
+          const start = String(response).indexOf('{');
+          const end = String(response).lastIndexOf('}');
+          if (start === -1 || end <= start) throw new Error('resposta sem JSON');
+          return JSON.parse(String(response).slice(start, end + 1));
+        }
       }
     } catch (e) {
       console.log(chalk.yellow('   [JIT] Falha ao analisar com LLM: ' + e.message));

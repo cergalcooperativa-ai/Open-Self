@@ -165,19 +165,25 @@ describe('WhatsAppGateway — passive listening, triggers, JIT personality', () 
         expect(sock.sendMessage).toHaveBeenCalledTimes(1);
     });
 
-    it('respects online_hours (08:00-23:00): learns but stays mute at night', async () => {
+    it('owner activation has sovereignty over night hours unless OPENSELF_ENFORCE_ONLINE_HOURS=1', async () => {
         await gw.handleMessage(incoming('oi', 'A1'));
         await gw.handleMessage(own('.', 'M1'));
 
+        // By default, owner activation is sovereign even at 03:00 BRT
         gw.now = () => new Date('2026-10-14T06:00:00Z'); // 03:00 BRT
         await gw.handleMessage(incoming('acordado?', 'A2'));
-        expect(sock.sendMessage).not.toHaveBeenCalled();
-        const heard = (await gw.chatMemory.findRelevant('', 'Maria', 10)).map((m) => m.theirMessage);
-        expect(heard).toContain('acordado?');
-
-        gw.now = () => new Date('2026-10-14T23:30:00Z'); // 20:30 BRT
-        await gw.handleMessage(incoming('e agora?', 'A3'));
         expect(sock.sendMessage).toHaveBeenCalledTimes(1);
+
+        // When explicitly enforced, it respects online_hours schedule
+        process.env.OPENSELF_ENFORCE_ONLINE_HOURS = '1';
+        try {
+            await gw.handleMessage(incoming('acordado ainda?', 'A3'));
+            expect(sock.sendMessage).toHaveBeenCalledTimes(1); // not called again
+            const heard = (await gw.chatMemory.findRelevant('', 'Maria', 10)).map((m) => m.theirMessage);
+            expect(heard).toContain('acordado ainda?');
+        } finally {
+            delete process.env.OPENSELF_ENFORCE_ONLINE_HOURS;
+        }
     });
 
     it.each([

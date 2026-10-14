@@ -54,10 +54,17 @@ export class ClonePipeline {
     // Generate response via LLM
     let rawReply;
     if (this.brain) {
-      rawReply = await this.brain.generate(systemPrompt, text);
+      if (typeof this.brain.generate === 'function') {
+        rawReply = await this.brain.generate(systemPrompt, text);
+      } else if (typeof this.brain.chat === 'function') {
+        rawReply = await this.brain.chat(systemPrompt, text);
+      } else {
+        rawReply = this.generateFallback(text, contact);
+      }
     } else {
       rawReply = this.generateFallback(text, contact);
     }
+
 
     // Empty LLM output (provider failure) must never turn into a sent message
     const cleanReply = cleanAIReveal(String(rawReply || ''));
