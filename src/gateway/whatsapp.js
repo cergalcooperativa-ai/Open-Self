@@ -588,8 +588,12 @@ export class WhatsAppGateway {
 
   async stop() {
     this._stopped = true;
+    if (this._keepAlive) {
+      clearInterval(this._keepAlive);
+      this._keepAlive = null;
+    }
     try {
-      this.sock?.ev.removeAllListeners();
+      this.sock?.ev?.removeAllListeners();
       this.sock?.end?.(undefined);
     } catch {}
     process.exit(0);
@@ -602,6 +606,9 @@ export class WhatsAppGateway {
     await this._connect();
     console.log(chalk.gray('  WhatsApp -> Configuracoes -> Aparelhos conectados -> Conectar aparelho'));
     console.log(chalk.gray('  Sessao sera salva para reconexoes futuras'));
+    if (!this._keepAlive) {
+      this._keepAlive = setInterval(() => {}, 60000);
+    }
   }
 
   async _connect() {
@@ -634,6 +641,11 @@ export class WhatsAppGateway {
       if (qr) {
         qrcodeTerminal.generate(qr, { small: true });
         console.log(chalk.gray('  QR code gerado - escaneie com seu WhatsApp'));
+        try {
+          writeFileSync('/tmp/wa_qr.txt', qr, 'utf-8');
+          const QRCode = (await import('qrcode')).default;
+          await QRCode.toFile(join(this.dataDir, '..', 'qr_whatsapp.png'), qr, { width: 480, margin: 2 });
+        } catch {}
       }
 
       if (connection === 'open') {
