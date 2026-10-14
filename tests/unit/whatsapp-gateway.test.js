@@ -55,6 +55,7 @@ describe('WhatsAppGateway — passive listening, triggers, JIT personality', () 
         gw.sock = sock;
         gw.sleep = async () => {};
         gw.now = () => new Date('2026-10-14T15:00:00Z'); // 12:00 America/Sao_Paulo
+        gw.batchMaxMs = 0; // batching off by default: one reply per message (legacy behaviour)
     });
 
     afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -268,5 +269,97 @@ describe('WhatsAppGateway — passive listening, triggers, JIT personality', () 
         );
         gw.loadContacts();
         expect(gw.contacts.Maria.relationship).toBe('amiga');
+    });
+});
+
+describe('WhatsAppGateway — message batching (burst => one reply)', () => {
+    let root, dataDir, gw, sock, brain;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    beforeEach(async () => {
+        root = mkdtempSync(join(tmpdir(), 'openself-batch-'));
+        dataDir = join(root, 'data');
+        brain = { generate: vi.fn(async () => 'beleza') };
+        const pipeline = new ClonePipeline({ dataDir, config: {} });
+        pipeline.setBrain(brain);
+        gw = new WhatsAppGateway({
+            dataDir,
+            sessionDir: join(dataDir, 'whatsapp-session'),
+            pipeline,
+            ghost: { getStatus: () => ({ ghostMode: false }), shouldCloneReply: () => true },
+        });
+        pipeline.setMemory(gw.conversationMemory, gw.chatMemory);
+        sock = {
+            user: { id: 'me@s.whatsapp.net' },
+            readMessages: vi.fn(async () => {}),
+            presenceSubscribe: vi.fn(async () => {}),
+            sendPresenceUpdate: vi.fn(async () => {}),
+            sendMessage: vi.fn(async () => ({ key: { id: 'BOT-' + Math.random() } })),
+        };
+        gw.sock = sock;
+        gw.sleep = async () => {};
+        gw.now = () => new Date('2026-10-14T15:00:00Z');
+        gw.batchMinMs = 40;
+        gw.batchMaxMs = 60;
+        gw.batchCapMs = 1000;
+        await gw.handleMessage(incoming('oi', 'A0'));
+        await gw.handleMessage(own('.', 'M0'));
+        brain.generate.mockClear();
+        sock.sendMessage.mockClear();
+    });
+
+    afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+    it('merges 3 rapid messages into a single LLM call and a single reply', async () => {
+        await gw.handleMessage(incoming('oi', 'B1'));
+        await gw.handleMessage(incoming('tudo bem?', 'B2'));
+        await gw.handleMessage(incoming('preciso de um orcamento', 'B3'));
+        expect(sock.sendMessage).not.toHaveBeenCalled();
+
+        await wait(250);
+
+        expect(brain.generate).toHaveBeenCalledTimes(1);
+        expect(brain.generate.mock.calls[0][1]).toBe('oi\ntudo bem?\npreciso de um orcamento');
+        expect(sock.sendMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('still learns every message of the burst individually (RAG)', async () => {
+        await gw.handleMessage(incoming('primeira', 'B1'));
+        await gw.handleMessage(incoming('segunda', 'B2'));
+        const heard = (await gw.chatMemory.findRelevant('', 'Maria', 20)).map((m) => m.theirMessage);
+        expect(heard).toEqual(expect.arrayContaining(['primeira', 'segunda']));
+        await wait(250);
+    });
+
+    it('collapses the burst into one entry in the conversation context', async () => {
+        await gw.handleMessage(incoming('msg um', 'B1'));
+        await gw.handleMessage(incoming('msg dois', 'B2'));
+        await wait(250);
+        const ctx = gw.conversationMemory.getRecentContext('Maria', 10);
+        expect(ctx).toContain('Maria: msg um\nmsg dois');
+        expect(ctx.match(/msg um/g)).toHaveLength(1);
+        expect(ctx).toContain('You: beleza');
+    });
+
+    it('cancels the queued reply when the owner writes in the chat first', async () => {
+        await gw.handleMessage(incoming('me responde', 'B1'));
+        await gw.handleMessage(own('ja vou ai', 'M1'));
+        await wait(250);
+        expect(sock.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not send if the owner pauses the bot (" ,") before the window closes', async () => {
+        await gw.handleMessage(incoming('e ai', 'B1'));
+        await gw.handleMessage(own(',', 'M1'));
+        await wait(250);
+        expect(sock.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('messages arriving after the reply was sent start a new batch', async () => {
+        await gw.handleMessage(incoming('primeira', 'B1'));
+        await wait(250);
+        await gw.handleMessage(incoming('segunda', 'B2'));
+        await wait(250);
+        expect(sock.sendMessage).toHaveBeenCalledTimes(2);
     });
 });

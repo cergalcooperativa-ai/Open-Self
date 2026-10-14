@@ -86,6 +86,32 @@ export class ConversationMemory {
     }
 
     /**
+     * Collapse a burst of pending messages (one per incoming message) into a single
+     * exchange: theirs joined by newline, followed by the one merged reply.
+     */
+    resolveBatch(contact, texts, reply) {
+        if (!this.sessions.has(contact)) this.sessions.set(contact, []);
+        const session = this.sessions.get(contact);
+        const remaining = [...texts];
+        while (
+            session.length &&
+            session[session.length - 1].clone === '[PENDING_REPLY]' &&
+            remaining.includes(session[session.length - 1].them)
+        ) {
+            const gone = session.pop();
+            remaining.splice(remaining.lastIndexOf(gone.them), 1);
+        }
+        session.push({
+            timestamp: new Date().toISOString(),
+            them: texts.join('\n'),
+            clone: reply,
+        });
+        if (session.length > 20) session.splice(0, session.length - 20);
+        this._saveSessions();
+        if (this.persist) this._appendToFile(contact, texts.join(' / '), reply);
+    }
+
+    /**
      * Record a reply from the operator/user, resolving pending contact messages
      */
     recordUserReply(contact, reply) {

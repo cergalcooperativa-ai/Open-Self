@@ -79,6 +79,15 @@ export class WhatsAppGateway {
     this._jitInFlight = new Map();
     this._stopped = false;
 
+    // Message batching: a burst of messages from the same contact is merged into ONE reply.
+    // Window = silence after the last message (random between min/max, hard-capped).
+    // OPENSELF_BATCH_MAX_MS=0 disables batching (immediate reply per message).
+    this.batchMinMs = Number(process.env.OPENSELF_BATCH_MIN_MS ?? 5000);
+    this.batchMaxMs = Number(process.env.OPENSELF_BATCH_MAX_MS ?? 9000);
+    this.batchCapMs = Number(process.env.OPENSELF_BATCH_CAP_MS ?? 60000);
+    this._pending = new Map(); // contactKey -> { contactName, texts, firstAt, msg, timer, deferred }
+    this._inFlight = new Map(); // contactKey -> Promise of the reply job being generated/sent
+
     this.loadContacts();
     this.loadTriggers();
     this.loadJidMap();
@@ -283,6 +292,9 @@ export class WhatsAppGateway {
       const contactName = this.resolveContactKey(msg);
       if (!contactName) return;
 
+      // Owner is typing in this chat: any reply the bot had queued for it is cancelled
+      this._cancelPending(contactName);
+
       if (triggerAction === 'activate') {
         if (!this.jidMap[jid]) {
           this.jidMap[jid] = contactName;
@@ -350,7 +362,92 @@ export class WhatsAppGateway {
     await this.ensureProfile(normalizedSender);
 
     // 6. Generate and send reply
-    await this.generateAndSendReply(normalizedSender, processedText, msg);
+    await this.queueReply(normalizedSender, processedText, msg);
+  }
+
+  /**
+   * Buffer incoming messages per contact and answer the whole burst once, like a human
+   * who reads everything before replying (one reply per message is a bot tell).
+   */
+  async queueReply(contactName, text, msg) {
+    const key = this.normalizeContact(contactName);
+    if (this.batchMaxMs <= 0) {
+      return this.generateAndSendReply(contactName, text, msg, [text]);
+    }
+    let p = this._pending.get(key);
+    if (!p) {
+      p = { contactName, texts: [], firstAt: Date.now(), msg, timer: null, deferred: false };
+      this._pending.set(key, p);
+    }
+    p.texts.push(text);
+    p.msg = msg;
+    this._armBatchTimer(key);
+    if (p.texts.length > 1) {
+      console.log(chalk.gray('   [BATCH] ' + p.texts.length + ' mensagens de ' + contactName + ' agrupadas em uma resposta'));
+    }
+  }
+
+  _armBatchTimer(key) {
+    const p = this._pending.get(key);
+    if (!p) return;
+    if (p.timer) clearTimeout(p.timer);
+    const span = Math.max(this.batchMaxMs - this.batchMinMs, 0);
+    let wait = this.batchMinMs + Math.random() * span;
+    const remainingCap = this.batchCapMs - (Date.now() - p.firstAt);
+    wait = Math.max(0, Math.min(wait, remainingCap));
+    p.timer = setTimeout(() => {
+      this._flushPending(key).catch((e) => console.error(chalk.red('   [BATCH] Erro: ' + e.message)));
+    }, wait);
+    p.timer.unref?.();
+  }
+
+  _cancelPending(contactName) {
+    const key = this.normalizeContact(contactName);
+    const p = this._pending.get(key);
+    if (!p) return;
+    if (p.timer) clearTimeout(p.timer);
+    this._pending.delete(key);
+    console.log(chalk.gray('   [BATCH] resposta pendente de ' + contactName + ' cancelada (dono assumiu o chat)'));
+  }
+
+  async _flushPending(key) {
+    const p = this._pending.get(key);
+    if (!p || this._stopped) return;
+    // A reply for this contact is still being generated/sent: wait for it, then re-arm
+    if (this._inFlight.has(key)) {
+      p.deferred = true;
+      return;
+    }
+    if (p.timer) clearTimeout(p.timer);
+    this._pending.delete(key);
+
+    // Owner may have paused the bot / hit the kill-switch while we were waiting
+    if (this.isGloballyDisabled() || !this.getTriggerState(key)) {
+      this.stats.ignored++;
+      return;
+    }
+
+    const texts = p.texts.slice();
+    const job = (async () => {
+      const res = await this.generateAndSendReply(p.contactName, texts.join('\n'), p.msg, texts);
+      if (res && res.superseded) {
+        // New messages arrived while we were "reading": merge them into the next batch
+        const np = this._pending.get(key);
+        if (np) {
+          np.texts = [...texts, ...np.texts];
+          np.firstAt = p.firstAt;
+        }
+      }
+    })().finally(() => {
+      this._inFlight.delete(key);
+      const np = this._pending.get(key);
+      if (np && np.deferred) {
+        np.deferred = false;
+        this._armBatchTimer(key);
+      }
+    });
+    this._inFlight.set(key, job);
+    await job;
   }
 
   // Learn from self: operator messages sent directly from phone
@@ -506,7 +603,7 @@ export class WhatsAppGateway {
   }
 
   // Generate and send reply
-  async generateAndSendReply(contactName, text, msg) {
+  async generateAndSendReply(contactName, text, msg, batchTexts = [text]) {
     const normalizedContact = this.normalizeContact(contactName);
     const profile = this.contacts[normalizedContact] || {};
 
@@ -568,6 +665,17 @@ export class WhatsAppGateway {
 
         await this.sleep(readDelay);
 
+        // Owner took over / kill-switch during the "reading" time: send nothing
+        if (this.isGloballyDisabled() || !this.getTriggerState(normalizedContact)) {
+          this.stats.ignored++;
+          return { aborted: true };
+        }
+        // More messages arrived while "reading": drop this draft, answer everything at once
+        if (this._pending.get(normalizedContact)?.texts.length) {
+          console.log(chalk.gray('   [BATCH] chegou mais mensagem de ' + contactName + ' durante a leitura - unificando resposta'));
+          return { superseded: true };
+        }
+
         try {
           await this.sock.readMessages([msg.key]);
         } catch {}
@@ -595,7 +703,11 @@ export class WhatsAppGateway {
           }
         }
 
-        this.conversationMemory.addExchange(contactName, text, fullReply);
+        if (batchTexts.length > 1 && typeof this.conversationMemory.resolveBatch === 'function') {
+          this.conversationMemory.resolveBatch(contactName, batchTexts, fullReply);
+        } else {
+          this.conversationMemory.addExchange(contactName, text, fullReply);
+        }
 
         try {
           await this.chatMemory.indexHistory([{
