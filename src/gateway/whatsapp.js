@@ -161,6 +161,17 @@ export class WhatsAppGateway {
     return String(name).replace(/^[~\s]+/, '').trim();
   }
 
+  // Dynamic identity name of the connected WhatsApp owner session / clone
+  getOwnerName() {
+    if (this.sock?.user?.name) return this.sock.user.name;
+    try {
+      const soul = readFileSync(join(this.dataDir, 'SOUL.md'), 'utf-8');
+      const m = soul.match(/Name:\s*([^\r\n]+)/i) || soul.match(/Nome:\s*([^\r\n]+)/i);
+      if (m && m[1].trim()) return m[1].trim();
+    } catch {}
+    return this.appConfig?.ownerName || process.env.OPENSELF_NAME || 'Johnny';
+  }
+
   // Check if global kill-switch is active
   isGloballyDisabled() {
     return existsSync(this.responsesDisabledFile);
@@ -239,7 +250,10 @@ export class WhatsAppGateway {
       return pushName || this.normalizeContact(msg.key.participant?.split('@')[0] || 'Unknown');
     }
     if (!this.jidMap[jid]) {
-      this.jidMap[jid] = pushName || number;
+      // Do not assign the owner's own session name to an external contact
+      const ownerName = this.getOwnerName();
+      const safeName = (pushName && pushName.toLowerCase() !== ownerName.toLowerCase()) ? pushName : number;
+      this.jidMap[jid] = safeName;
       this.saveJidMap();
     }
     return this.jidMap[jid];
@@ -278,13 +292,13 @@ export class WhatsAppGateway {
         }
         this.setTriggerState(contactName, true);
         if (processedText) await this.learnFromSelf(contactName, processedText);
-        console.log(chalk.green('   [TRIGGER] Ativado para ' + contactName));
+        console.log(chalk.green('   [TRIGGER] Ativado para ' + contactName + ' (pelo dono da sessao)'));
         // Just-in-Time Personality: build the profile right now from accumulated history
         await this.ensureProfile(contactName);
       } else {
         this.setTriggerState(contactName, false);
         if (processedText) await this.learnFromSelf(contactName, processedText);
-        console.log(chalk.yellow('   [TRIGGER] Desativado para ' + contactName));
+        console.log(chalk.yellow('   [TRIGGER] Desativado para ' + contactName + ' (pelo dono da sessao)'));
       }
       return;
     }
@@ -453,7 +467,8 @@ export class WhatsAppGateway {
 
   // Ask the LLM for the contact profile. Returns a plain object or null on any failure.
   async analyzeAndCreateProfile(contactName, context) {
-    const prompt = 'Analise este historico de conversa entre o usuario (Megasom&luz) e ' + contactName + '.\n' +
+    const ownerName = this.getOwnerName();
+    const prompt = 'Analise este historico de conversa entre o usuario (' + ownerName + ') e ' + contactName + '.\n' +
       'Determine: 1) Tipo de relacionamento (amigo, familiar, cliente, trabalho, desconhecido)\n' +
       '2) Tom apropriado (casual, formal, intimo, profissional)\n' +
       '3) Regras de comunicacao (o que evitar, como responder)\n' +
@@ -489,6 +504,7 @@ export class WhatsAppGateway {
 
     const contact = {
       name: contactName,
+      ownerName: this.getOwnerName(),
       jid: msg.key.remoteJid,
       isGroup: msg.key.remoteJid?.endsWith('@g.us'),
       channel: 'WhatsApp',
@@ -531,6 +547,10 @@ export class WhatsAppGateway {
 
       if (result.action === 'reply' && result.replies.length > 0) {
         const readDelay = Math.min(result.delay * 0.3, 5000);
+        const typingTime = Math.min(result.replies[0].length * 60, 4000);
+        const totalDelaySec = ((readDelay + typingTime) / 1000).toFixed(1);
+        console.log(chalk.cyan(`   [MIMICRY] Aguardando ${totalDelaySec}s antes de responder...`));
+
         await this.sleep(readDelay);
 
         try {

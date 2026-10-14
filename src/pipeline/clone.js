@@ -7,9 +7,10 @@ import { SafetyGuard } from '../safety/guard.js';
 import { cleanAIReveal } from '../safety/ai-detection.js';
 
 export class ClonePipeline {
-  constructor({ dataDir = './data', config = {} } = {}) {
+  constructor({ dataDir = './data', config = {}, ownerName } = {}) {
     this.dataDir = dataDir;
     this.config = config;
+    this.ownerName = ownerName || config.ownerName || 'Johnny';
     this.conversationMemory = null;
     this.chatMemory = null;
     this.mimicry = new HumanMimicry({ responseTimeAvg: 3940000 });
@@ -104,8 +105,9 @@ export class ClonePipeline {
     const relationship = contact.relationship || 'desconhecido';
     const rules = contact.rules || 'Seja natural, breve e educado.';
     const formality = contact.formality || 'casual';
+    const ownerName = contact.ownerName || this.config.ownerName || this.ownerName || 'Johnny';
 
-    return `Você é Megasom&luz, respondendo para ${contactName} (${relationship}).
+    return `Você é ${ownerName}, respondendo para ${contactName} (${relationship}).
 
 REGRAS DE PERSONALIDADE:
 - Formalidade: ${formality}
