@@ -20,6 +20,7 @@ import { ClonePipeline } from '../pipeline/clone.js';
 import { GhostMode } from '../ghost/ghost.js';
 import { createProvider, autoDetectProvider } from '../brain/router.js';
 import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import qrcodeTerminal from 'qrcode-terminal';
 
 const SYSTEM_EVENT_RE =
   /^(mensagem apagada|mensagem editada|voc\u00ea apagou|\u00e1udio ocultado|imagem ocultada|v\u00eddeo omitido|liga\u00e7\u00e3o de voz( perdida| silenciada)?|missed (voice|video) call|you deleted|this message was deleted)/i;
@@ -621,9 +622,8 @@ export class WhatsAppGateway {
 
     this.sock = makeWASocket({
       auth: state,
-      printQRInTerminal: true,
-      qrTimeout: 60000,
-      logger: { level: 'silent', warn: () => {}, error: () => {}, info: () => {}, debug: () => {}, child: () => ({ warn: () => {}, error: () => {}, info: () => {}, debug: () => {} }) }
+      browser: ['OpenSelf', 'Chrome', '120.0'],
+      syncFullHistory: false,
     });
 
     this.sock.ev.on('creds.update', saveCreds);
@@ -632,6 +632,7 @@ export class WhatsAppGateway {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
+        qrcodeTerminal.generate(qr, { small: true });
         console.log(chalk.gray('  QR code gerado - escaneie com seu WhatsApp'));
       }
 
