@@ -55,11 +55,24 @@ export class ConversationMemory {
         }
 
         const session = this.sessions.get(contact);
-        session.push({
-            timestamp: new Date().toISOString(),
-            them: theirMessage,
-            clone: cloneReply,
-        });
+        const last = session[session.length - 1];
+
+        // Atualiza a mensagem pendente em vez de duplicar
+        if (
+            last &&
+            last.them === theirMessage &&
+            last.clone === '[PENDING_REPLY]' &&
+            cloneReply !== '[PENDING_REPLY]'
+        ) {
+            last.clone = cloneReply;
+            last.timestamp = new Date().toISOString();
+        } else {
+            session.push({
+                timestamp: new Date().toISOString(),
+                them: theirMessage,
+                clone: cloneReply,
+            });
+        }
 
         // Keep only last 20 exchanges per contact (sliding window)
         if (session.length > 20) {
@@ -73,14 +86,45 @@ export class ConversationMemory {
     }
 
     /**
-     * Get recent conversation context for a contact
+     * Record a reply from the operator/user, resolving pending contact messages
+     */
+    recordUserReply(contact, reply) {
+        if (!this.sessions.has(contact)) {
+            this.sessions.set(contact, []);
+        }
+        const session = this.sessions.get(contact);
+        const last = session[session.length - 1];
+        if (last && (last.clone === '[PENDING_REPLY]' || last.clone === '[TRIGGER]')) {
+            last.clone = reply;
+            last.timestamp = new Date().toISOString();
+        } else {
+            session.push({
+                timestamp: new Date().toISOString(),
+                them: '',
+                clone: reply,
+            });
+        }
+        if (session.length > 20) session.splice(0, session.length - 20);
+        this._saveSessions();
+    }
+
+    /**
+     * Get recent conversation context for a contact (filters internal markers)
      */
     getRecentContext(contact, maxExchanges = 10) {
         const session = this.sessions.get(contact);
         if (!session || session.length === 0) return '';
 
+        const MARKER_REPLIES = new Set(['[TRIGGER]', '[PENDING_REPLY]', '']);
         const recent = session.slice(-maxExchanges);
-        return recent.map((ex) => `${contact}: ${ex.them}\nYou: ${ex.clone}`).join('\n\n');
+        const lines = [];
+
+        for (const ex of recent) {
+            if (ex.them) lines.push(`${contact}: ${ex.them}`);
+            if (ex.clone && !MARKER_REPLIES.has(ex.clone)) lines.push(`You: ${ex.clone}`);
+        }
+
+        return lines.join('\n\n');
     }
 
     /**

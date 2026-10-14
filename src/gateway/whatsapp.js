@@ -275,13 +275,11 @@ export class WhatsAppGateway {
     // 1. Skip system events
     if (SYSTEM_EVENT_RE.test(text.trim())) return;
 
-    // 2. FROM ME: only owner triggers. Echoes of the bot's own replies are ignored.
+    // 2. FROM ME: owner triggers & manual messages (sent from phone)
     if (msg.key.fromMe) {
       if (msg.key.id && this.sentIds.has(msg.key.id)) return;
 
       const { processedText, triggerAction } = this.processTriggers(text);
-      if (!triggerAction) return;
-
       const contactName = this.resolveContactKey(msg);
       if (!contactName) return;
 
@@ -295,10 +293,13 @@ export class WhatsAppGateway {
         console.log(chalk.green('   [TRIGGER] Ativado para ' + contactName + ' (pelo dono da sessao)'));
         // Just-in-Time Personality: build the profile right now from accumulated history
         await this.ensureProfile(contactName);
-      } else {
+      } else if (triggerAction === 'deactivate') {
         this.setTriggerState(contactName, false);
         if (processedText) await this.learnFromSelf(contactName, processedText);
         console.log(chalk.yellow('   [TRIGGER] Desativado para ' + contactName + ' (pelo dono da sessao)'));
+      } else {
+        // Mensagem normal do dono pelo celular (sem gatilho): registra como fala do operador
+        if (processedText) await this.learnFromSelf(contactName, processedText);
       }
       return;
     }
@@ -352,21 +353,28 @@ export class WhatsAppGateway {
     await this.generateAndSendReply(normalizedSender, processedText, msg);
   }
 
-  // Learn from self trigger messages
+  // Learn from self: operator messages sent directly from phone
   async learnFromSelf(contactName, text) {
     try {
-      this.conversationMemory.addExchange(contactName, text, '[TRIGGER]');
+      const normalized = this.normalizeContact(contactName);
+      const session = this.conversationMemory.sessions.get(contactName) || [];
+      const pendingThem = session.length > 0 && session[session.length - 1].them ? session[session.length - 1].them : '';
 
-      await this.chatMemory.indexHistory([{
-        contact: this.normalizeContact(contactName),
-        theirMessage: text,
-        yourReply: '[TRIGGER]',
-        date: new Date().toISOString().split('T')[0],
-        time: new Date().toTimeString().slice(0, 5),
-        replyDelay: 0
-      }], { batchSize: 1 });
+      this.conversationMemory.recordUserReply(contactName, text);
+
+      if (pendingThem) {
+        await this.chatMemory.indexHistory([{
+          contact: normalized,
+          theirMessage: pendingThem,
+          yourReply: text,
+          date: new Date().toISOString().split('T')[0],
+          time: new Date().toTimeString().slice(0, 5),
+          replyDelay: 0
+        }], { batchSize: 1 });
+        console.log(chalk.cyan('   [LEARN] Resposta do operador salva p/ ' + contactName + ' (memoria + RAG)'));
+      }
     } catch (e) {
-      console.log(chalk.yellow('   [LEARN] Falha ao aprender trigger proprio: ' + e.message));
+      console.log(chalk.yellow('   [LEARN] Falha ao aprender do operador: ' + e.message));
     }
   }
 
