@@ -21,6 +21,7 @@ import { GhostMode } from '../ghost/ghost.js';
 import { createProvider, autoDetectProvider } from '../brain/router.js';
 import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
+import QRCode from 'qrcode';
 
 const SYSTEM_EVENT_RE =
   /^(mensagem apagada|mensagem editada|voc\u00ea apagou|\u00e1udio ocultado|imagem ocultada|v\u00eddeo omitido|liga\u00e7\u00e3o de voz( perdida| silenciada)?|missed (voice|video) call|you deleted|this message was deleted)/i;
@@ -635,7 +636,7 @@ export class WhatsAppGateway {
 
     this.sock.ev.on('creds.update', saveCreds);
 
-    this.sock.ev.on('connection.update', (update) => {
+    this.sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
@@ -643,7 +644,6 @@ export class WhatsAppGateway {
         console.log(chalk.gray('  QR code gerado - escaneie com seu WhatsApp'));
         try {
           writeFileSync('/tmp/wa_qr.txt', qr, 'utf-8');
-          const QRCode = (await import('qrcode')).default;
           await QRCode.toFile(join(this.dataDir, '..', 'qr_whatsapp.png'), qr, { width: 480, margin: 2 });
         } catch {}
       }

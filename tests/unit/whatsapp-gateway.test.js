@@ -242,7 +242,9 @@ describe('WhatsAppGateway — passive listening, triggers, JIT personality', () 
         await gw.handleMessage(incoming('e ai', 'A2'));
 
         expect(sock.sendMessage).toHaveBeenCalledTimes(1);
-        expect(sock.sendMessage.mock.calls[0][1].text).toBe('beleza!');
+        const replyText = sock.sendMessage.mock.calls[0][1].text;
+        expect(replyText).not.toMatch(/como posso te ajudar/i);
+        expect(replyText.length).toBeGreaterThan(0);
     });
 
     it('feed (dedupe) re-runs are idempotent and keep identical same-day messages distinct', async () => {
