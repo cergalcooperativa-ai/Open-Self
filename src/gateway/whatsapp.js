@@ -805,12 +805,18 @@ export class WhatsAppGateway {
       }
 
       if (connection === 'close') {
-        const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason?.loggedOut;
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason?.loggedOut;
         if (shouldReconnect && !this._reconnecting && !this._stopped) {
           this._reconnecting = true;
-          setTimeout(() => {
+          setTimeout(async () => {
             this._reconnecting = false;
-            this._connect();
+            if (this._stopped) return;
+            try {
+              await this._connect();
+            } catch (err) {
+              console.error(chalk.red('Erro ao reconectar: ' + (err?.message || err)));
+            }
           }, 5000);
         }
       }
