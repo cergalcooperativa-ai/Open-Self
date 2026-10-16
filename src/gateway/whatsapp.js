@@ -454,10 +454,24 @@ export class WhatsAppGateway {
   async learnFromSelf(contactName, text) {
     try {
       const normalized = this.normalizeContact(contactName);
-      const session = this.conversationMemory.sessions.get(contactName) || [];
-      const pendingThem = session.length > 0 && session[session.length - 1].them ? session[session.length - 1].them : '';
+      const session = this.conversationMemory.sessions.get(normalized) || this.conversationMemory.sessions.get(contactName) || [];
+      
+      // Collect all pending incoming messages that the operator is now replying to
+      const pendingThemList = [];
+      for (let i = session.length - 1; i >= 0; i--) {
+        if (session[i].clone === '[PENDING_REPLY]' || session[i].clone === '[TRIGGER]') {
+          if (session[i].them) pendingThemList.unshift(session[i].them);
+        } else {
+          break;
+        }
+      }
+      const pendingThem = pendingThemList.join('\n') || (session.length > 0 && session[session.length - 1].them ? session[session.length - 1].them : '');
 
-      this.conversationMemory.recordUserReply(contactName, text);
+      if (pendingThemList.length > 1 && typeof this.conversationMemory.resolveBatch === 'function') {
+        this.conversationMemory.resolveBatch(normalized, pendingThemList, text);
+      } else {
+        this.conversationMemory.recordUserReply(normalized, text);
+      }
 
       if (pendingThem) {
         await this.chatMemory.indexHistory([{

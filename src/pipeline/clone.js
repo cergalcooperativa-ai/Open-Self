@@ -42,8 +42,9 @@ export class ClonePipeline {
     let ragContext = '';
     if (this.chatMemory) {
       const memories = await this.chatMemory.findRelevant(text, contactName, 5);
-      if (memories.length > 0) {
-        ragContext = memories.map(m => 
+      const validMemories = memories.filter(m => m.yourReply && !['[PENDING_REPLY]', '[TRIGGER]'].includes(m.yourReply.trim()));
+      if (validMemories.length > 0) {
+        ragContext = validMemories.map(m => 
           `${m.contact}: ${m.theirMessage}\nYou: ${m.yourReply}`
         ).join('\n\n');
       }
