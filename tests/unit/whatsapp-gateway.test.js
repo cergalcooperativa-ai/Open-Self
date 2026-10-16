@@ -128,6 +128,7 @@ describe('WhatsAppGateway — passive listening, triggers, JIT personality', () 
     it('global kill-switch blocks replies but never learning', async () => {
         await gw.handleMessage(incoming('oi', 'A1'));
         await gw.handleMessage(own('.', 'M1'));
+        sock.sendMessage.mockClear();
         gw._ensureDataDir();
         const flag = join(dataDir, 'RESPONSES_DISABLED');
         (await import('node:fs')).writeFileSync(flag, '');
@@ -161,6 +162,7 @@ describe('WhatsAppGateway — passive listening, triggers, JIT personality', () 
         gw.ghost = { getStatus: () => ({ ghostMode: true }), shouldCloneReply: () => false };
         await gw.handleMessage(incoming('oi', 'A1'));
         await gw.handleMessage(own('.', 'M1'));
+        sock.sendMessage.mockClear();
         await gw.handleMessage(incoming('responde ai', 'A2'));
 
         expect(sock.sendMessage).toHaveBeenCalledTimes(1);
@@ -169,6 +171,7 @@ describe('WhatsAppGateway — passive listening, triggers, JIT personality', () 
     it('owner activation has sovereignty over night hours unless OPENSELF_ENFORCE_ONLINE_HOURS=1', async () => {
         await gw.handleMessage(incoming('oi', 'A1'));
         await gw.handleMessage(own('.', 'M1'));
+        sock.sendMessage.mockClear();
 
         // By default, owner activation is sovereign even at 03:00 BRT
         gw.now = () => new Date('2026-10-14T06:00:00Z'); // 03:00 BRT
@@ -245,6 +248,7 @@ describe('WhatsAppGateway — passive listening, triggers, JIT personality', () 
     it('removes assistant-speak in pt-BR instead of suppressing and still replies', async () => {
         await gw.handleMessage(incoming('oi', 'A1'));
         await gw.handleMessage(own('.', 'M1'));
+        sock.sendMessage.mockClear();
         brain.generate.mockImplementation(async () => 'beleza! Como posso te ajudar?');
         await gw.handleMessage(incoming('e ai', 'A2'));
 
@@ -252,6 +256,58 @@ describe('WhatsAppGateway — passive listening, triggers, JIT personality', () 
         const replyText = sock.sendMessage.mock.calls[0][1].text;
         expect(replyText).not.toMatch(/como posso te ajudar/i);
         expect(replyText.length).toBeGreaterThan(0);
+    });
+
+    it('silent takeover: owner sending "." with pending messages triggers bot reply to pending text without calling learnFromSelf', async () => {
+        await gw.handleMessage(incoming('preciso de som pra festa', 'P1'));
+        await gw.handleMessage(incoming('quanto fica?', 'P2'));
+        sock.sendMessage.mockClear();
+
+        // Owner sends silent trigger " ."
+        await gw.handleMessage(own('.', 'M_SILENT'));
+
+        expect(gw.getTriggerState('Maria')).toBe(true);
+        expect(sock.sendMessage).toHaveBeenCalledTimes(1);
+        expect(brain.generate).toHaveBeenCalledWith(
+            expect.any(String),
+            'preciso de som pra festa\nquanto fica?'
+        );
+    });
+
+    it('text with trigger: owner sending "Vou ver aqui ." records via learnFromSelf and does not trigger bot reply', async () => {
+        await gw.handleMessage(incoming('tem vaga pra hoje?', 'V1'));
+        sock.sendMessage.mockClear();
+
+        // Owner sends text + trigger
+        await gw.handleMessage(own('Vou ver aqui .', 'M_TEXT'));
+
+        expect(gw.getTriggerState('Maria')).toBe(true);
+        // Owner replied, so bot should not send a message
+        expect(sock.sendMessage).not.toHaveBeenCalled();
+        const memories = await gw.chatMemory.findRelevant('', 'Maria', 10);
+        expect(memories.some(m => m.yourReply === 'Vou ver aqui')).toBe(true);
+    });
+
+    it('third party message with trigger symbols never alters trigger state or calls processTriggers', async () => {
+        const spyProcess = vi.spyOn(gw, 'processTriggers');
+        await gw.handleMessage(incoming('quero comprar .', 'C1'));
+
+        expect(spyProcess).not.toHaveBeenCalled();
+        expect(gw.getTriggerState('Maria')).toBe(false);
+        expect(sock.sendMessage).not.toHaveBeenCalled();
+        spyProcess.mockRestore();
+    });
+
+    it('sanitizes accidental trailing period or comma from LLM output before sending', async () => {
+        await gw.handleMessage(own('.', 'M_ACT'));
+        sock.sendMessage.mockClear();
+        brain.generate.mockImplementation(async () => 'Tranquilo meu querido .');
+
+        await gw.handleMessage(incoming('consegue fazer?', 'C2'));
+        expect(sock.sendMessage).toHaveBeenCalledTimes(1);
+        const sentText = sock.sendMessage.mock.calls[0][1].text;
+        expect(sentText.toLowerCase()).toContain('querido');
+        expect(sentText).not.toMatch(/\s+[.,]$/);
     });
 
     it('feed (dedupe) re-runs are idempotent and keep identical same-day messages distinct', async () => {
@@ -304,6 +360,7 @@ describe('WhatsAppGateway — message batching (burst => one reply)', () => {
         gw.batchCapMs = 1000;
         await gw.handleMessage(incoming('oi', 'A0'));
         await gw.handleMessage(own('.', 'M0'));
+        await wait(200);
         brain.generate.mockClear();
         sock.sendMessage.mockClear();
     });

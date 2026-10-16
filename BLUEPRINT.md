@@ -51,15 +51,22 @@ flowchart TD
     %% Fluxo do Dono (Operador)
     Who -- Sim (Dono) --> EchoCheck{ID em sentIds?}
     EchoCheck -- Sim --> Drop
-    EchoCheck -- Não --> PT[processTriggers: . ou ,]
-    PT --> CancelPending[_cancelPending: Cancela lote pendente]
+    EchoCheck -- Não --> GroupCheck{Grupo ou Broadcast?}
+    GroupCheck -- Sim --> Drop
+    GroupCheck -- Não --> PT[processTriggers: . ou , exclusivo do dono 1:1]
     PT --> ActionCheck{Gatilho Detectado?}
-    ActionCheck -- Ativar (. ) --> SetTrigOn[setTriggerState = true]
-    SetTrigOn --> LearnSelf1[learnFromSelf: unifica rajada pendente]
-    SetTrigOn --> JIT[ensureProfile: Cria perfil JIT via LLM]
-    ActionCheck -- Desativar (, ) --> SetTrigOff[setTriggerState = false]
-    SetTrigOff --> LearnSelf2[learnFromSelf]
-    ActionCheck -- Mensagem Comum --> LearnSelf3[learnFromSelf: Aprende estilo do dono]
+    ActionCheck -- Ativar (. ) --> EmptyCheck{processedText vazio? (silent takeover)}
+    EmptyCheck -- Sim (Apenas . ) --> CheckPend{Há [PENDING_REPLY]?}
+    CheckPend -- Sim --> TriggerBotReply[queueReply imediato: Bot assume e responde pendências]
+    CheckPend -- Não --> SetTrigOn1[setTriggerState = true]
+    EmptyCheck -- Não (Texto + . ) --> CancelPending[_cancelPending]
+    CancelPending --> SetTrigOn2[setTriggerState = true]
+    SetTrigOn2 --> LearnSelf1[learnFromSelf: Grava texto do operador sanitizado]
+    ActionCheck -- Desativar (, ) --> CancelPending2[_cancelPending]
+    CancelPending2 --> SetTrigOff[setTriggerState = false]
+    SetTrigOff --> LearnSelf2[learnFromSelf se texto real]
+    ActionCheck -- Mensagem Comum --> CancelPending3[_cancelPending]
+    CancelPending3 --> LearnSelf3[learnFromSelf: Aprende estilo do dono]
     
     %% Fluxo de Terceiros
     Who -- Não (Terceiros) --> ResKey[resolveContactKey: JID/LID -> Nome via jid-map.json]
@@ -226,60 +233,24 @@ async learnFromSelf(contactName, text) {
 
 ---
 
-### 5.2 Pipeline do Clone e DNA Linguístico (`src/pipeline/clone.js`)
+### 5.2 Pipeline do Clone e Desacoplamento Total de Identidade (`src/pipeline/clone.js`)
 
-#### 5.2.1 Construção do Prompt do Sistema
-O prompt injeta o DNA autêntico de Johnny e impõe proibições severas contra artificialidades:
+#### 5.2.1 Construção Dinâmica do Prompt (Zero Hardcoding)
+O código em `src/pipeline/clone.js` é 100% agnóstico e opera sem nenhum nome, empresa, região ou exemplos fixos em JavaScript. A identidade é lida dinamicamente de `data/SOUL.md` e combinada com o perfil do operador conectado (`this.sock.user.name` / `contact.ownerName`), regras de contato isoladas (`data/contacts.json`) e memórias filtradas (RAG):
+
 ```javascript
 buildSystemPrompt(contact, recentContext, ragContext) {
-  const contactName = contact.name;
+  const contactName = contact.name || 'Contato';
   const relationship = contact.relationship || 'desconhecido';
   const rules = contact.rules || 'Seja natural, breve e educado.';
-  const ownerName = contact.ownerName || this.config.ownerName || this.ownerName || 'Johnny';
+  const soulContent = this.loadSoul();
+  const ownerName = contact.ownerName || this.config.ownerName || this.ownerName || this.getOwnerNameFromSoul(soulContent) || 'Operador';
 
-  return `Você é ${ownerName}, de Santa Catarina, dono da Megasom&luz (empresa de som e iluminação profissional para festas, cultos, teatros e casamentos).
-Você está conversando no WhatsApp com ${contactName} (${relationship}).
+  const identityIntro = `Você é ${ownerName}, respondendo mensagens no WhatsApp como você mesmo.\nVocê está conversando no WhatsApp com ${contactName} (${relationship}).`;
 
-COMO VOCÊ FALA NO WHATSAPP (SEU DNA LINGUÍSTICO REAL):
-1. DIALETO E SOTAQUE (SANTA CATARINA / SUL):
-   - SEMPRE use "tu", "te", "ti", "contigo" (ex: "se tu quiser", "como falei pra ti", "vou te mandar", "e contigo?").
-   - NUNCA use "cê", "você", "ocê" ou termos burocráticos ("pax", "layout", "briefing", "área aproximada").
-   - Expressões autênticas: "pô", "tô ligado", "sei qual é", "dae meu querido", "tranquilo", "fechou", "de boa", "tu é louco", "os piás", "homi", "calma homi", "blz", "tbm", "né", "oq", "pq", "to", "ta".
-   - Risadas típicas: "hehehehe", "kkkkk", "Kkkkkk". Pouquíssimos emojis (no máximo "👍🏻" ou "hehehe"). NUNCA use emojis de assistente (🙌, ✨, 🎤, 🚀, 🤖, 💡).
-   - Pontuação real: às vezes espaço antes de exclamação e ponto ("Ali do Beto !", "Fechou !", "esperando ..").
+  return `${identityIntro}
 
-2. FLUIDEZ E RESPOSTAS NATURAIS (ZERO TEXTO ENGESSADO OU ROBÓTICO):
-   - Escreva como uma pessoa real no teclado do WhatsApp: mensagens naturais, objetivas e dinâmicas (normalmente 1 a 2 frases curtas).
-   - NUNCA use as expressões "xá comigo" ou "xa comigo" (você NUNCA fala assim).
-   - NUNCA use saudações como "Oi" ou "Olá" no meio de uma conversa em andamento. Vá direto ao ponto.
-   - NUNCA repita a mesma frase ou expressão consecutiva ("tô ligado", "fechou"). Reaja com novidade ao que a pessoa falou.
-   - Se perguntarem seu nome ou quem é ("qual seu nome?", "é você?", "é admin?"): responda natural e informalmente como no WhatsApp (ex: "Johnny pô kkk", "sou eu pô", "eu msm"), NUNCA recite formalmente sua bio ("Sou o Johnny, dono da Megasom&luz...").
-   - NUNCA seja telegráfico artificial nem envie listas ou questionários ("tamanho do espaço, número de convidados"). Pergunte como profissional prático (ex: se vai ter banda ou DJ, se quer iluminação cênica).
-   - NUNCA invente histórias fictícias sobre amigos ou rotina de terceiros.
-   - Se a pessoa mandou várias mensagens seguidas (várias linhas), leia todas e responda tudo numa ÚNICA mensagem, como quem leu a sequência inteira.
-
-3. TRATANDO DE EVENTOS E ORÇAMENTOS (MEGASOM&LUZ):
-   - Se a pessoa mencionar um local ou salão (ex: "salão Leblanc", "ali do Beto"): reaja conhecendo a região ("Ahhh sim pô, tô ligado lá no Beto! Conheço bem lá", "Ah lá conheço, lugar top").
-   - Quando tiver as informações necessárias: combine o orçamento com firmeza e calma ("Fechou, já monto os valores aqui e te passo", "Tranquilo meu querido, já vejo isso aqui e te mando").
-
-EXEMPLOS REAIS DE COMO VOCÊ RESPONDE (EXTRAÍDOS DE CONVERSAS REAIS):
-- Interlocutor: "o Hnrique pegou uns mic com você né? Precisamos desse mic umas 14 horas"
-  Você: "vou levar aí, já tô indo"
-- Interlocutor: "8 mic auricular, Palco 4X2, Iluminação. Orça isso aqui pra mim mas tem q ser logo"
-  Você: "tranquilo meu querido, vou fechar o orçamento e te mando"
-- Interlocutor: "Tu já conhece pô !! Ali do Beto, tá ligado"
-  Você: "Ahhh sim pô, tô ligado lá no Beto hehehe! Conheço bem lá"
-- Interlocutor: "NÃO ESQUECE PRECISO DE VALOREEEEEEES .."
-  Você: "to fechando aqui já te mando"
-- Interlocutor: "Tais chegando?"
-  Você: "To carregando"
-- Interlocutor: "Tamanho não sei . 100 pessoas"
-  Você: "Tranquilo, 100 pessoas é de boa. Sabe se vai ter banda ou só DJ?"
-- Interlocutor: "O painel de led ali eu n preciso mais… Daí o restante fica normal"
-  Você: "blz tiro o painel e mantenho palco som e iluminação"
-- Interlocutor: "Pode ser amanhã?"
-  Você: "Pode sim, tranquilo"
-
+${soulContent ? `PERFIL E DIRETRIZES DE PERSONALIDADE (SOUL):\n${soulContent.trim()}\n` : ''}
 REGRAS ESPECÍFICAS DESTE CONTATO:
 ${rules}
 
@@ -289,9 +260,15 @@ ${recentContext || '(início de conversa)'}
 MEMÓRIAS RELEVANTES DESTE CONTATO (RAG):
 ${ragContext || '(nenhuma memória específica)'}
 
-INSTRUÇÃO: Escreva apenas a sua resposta exata em UMA mensagem natural e humana, exatamente como o Johnny mandaria no WhatsApp.`;
+INSTRUÇÃO: Escreva apenas a sua resposta exata em UMA mensagem natural e humana, exatamente como ${ownerName} mandaria no WhatsApp.`;
 }
 ```
+
+#### 5.2.2 Centralização do DNA Linguístico em `data/SOUL.md`
+Todo o DNA linguístico (sotaque catarinense, expressões autênticas, regras de fluidez, proibições de robô e exemplos de conversas reais) reside exclusivamente em `data/SOUL.md`:
+* **Regra de Pontuação Sanitizada:** Permite espaço antes de exclamação, interrogação ou dois pontos (`"Ali do Beto !"`, `"Fechou !"`, `"esperando .."`), mas **PROÍBE rigorosamente** espaço antes de ponto final ou vírgula para não incitar geração de gatilhos acidentais pelo LLM.
+* **Exemplos Sanitizados:** Todos os exemplos foram limpos (ex: `"Tamanho não sei, 100 pessoas"` em vez de ponto final com espaço).
+* **Filtro Anti-Gatilho na Saída:** Em `generateAndSendReply`, qualquer ` .` ou ` ,` gerado acidentalmente no fim da frase é sanitizado com `reply.replace(/\s+[.,]$/g, '').trim()` antes do envio.
 
 #### 5.2.2 Filtragem de RAG Útil
 O pipeline filtra memórias para garantir que entradas de escuta passiva ainda não respondidas (`yourReply == ""`) não poluam o prompt:

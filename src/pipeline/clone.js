@@ -2,6 +2,8 @@
  * Clone Pipeline - Core response generation with mimicry
  */
 
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
 import { HumanMimicry } from '../mimicry/humanlike.js';
 import { SafetyGuard } from '../safety/guard.js';
 import { cleanAIReveal } from '../safety/ai-detection.js';
@@ -10,7 +12,7 @@ export class ClonePipeline {
   constructor({ dataDir = './data', config = {}, ownerName } = {}) {
     this.dataDir = dataDir;
     this.config = config;
-    this.ownerName = ownerName || config.ownerName || 'Johnny';
+    this.ownerName = ownerName || config.ownerName || '';
     this.conversationMemory = null;
     this.chatMemory = null;
     this.mimicry = new HumanMimicry({ responseTimeAvg: 3940000 });
@@ -25,6 +27,39 @@ export class ClonePipeline {
 
   setBrain(brain) {
     this.brain = brain;
+  }
+
+  loadSoul() {
+    if (this.dataDir) {
+      const explicitPath = join(this.dataDir, 'SOUL.md');
+      if (existsSync(explicitPath)) {
+        try {
+          return readFileSync(explicitPath, 'utf-8');
+        } catch {}
+      }
+      // If dataDir is a custom directory (e.g. in tests), don't leak global process.cwd()
+      if (this.dataDir !== './data' && this.dataDir !== 'data') {
+        return '';
+      }
+    }
+    const candidates = [
+      join(process.cwd(), 'data', 'SOUL.md'),
+      './data/SOUL.md'
+    ];
+    for (const p of candidates) {
+      try {
+        if (existsSync(p)) {
+          return readFileSync(p, 'utf-8');
+        }
+      } catch {}
+    }
+    return '';
+  }
+
+  getOwnerNameFromSoul(soulText) {
+    if (!soulText) return '';
+    const m = soulText.match(/(?:Name|Nome):\s*([^\r\n]+)/i);
+    return m ? m[1].trim() : '';
   }
 
   async processMessage(message, contact) {
@@ -67,7 +102,6 @@ export class ClonePipeline {
       rawReply = this.generateFallback(text, contact);
     }
 
-
     // Empty LLM output (provider failure) must never turn into a sent message
     const cleanReply = cleanAIReveal(String(rawReply || ''));
     if (!cleanReply) {
@@ -102,54 +136,17 @@ export class ClonePipeline {
   }
 
   buildSystemPrompt(contact, recentContext, ragContext) {
-    const contactName = contact.name;
+    const contactName = contact.name || 'Contato';
     const relationship = contact.relationship || 'desconhecido';
     const rules = contact.rules || 'Seja natural, breve e educado.';
-    const ownerName = contact.ownerName || this.config.ownerName || this.ownerName || 'Johnny';
+    const soulContent = this.loadSoul();
+    const ownerName = contact.ownerName || this.config.ownerName || this.ownerName || this.getOwnerNameFromSoul(soulContent) || 'Operador';
 
-    return `Você é ${ownerName}, de Santa Catarina, dono da Megasom&luz (empresa de som e iluminação profissional para festas, cultos, teatros e casamentos).
-Você está conversando no WhatsApp com ${contactName} (${relationship}).
+    const identityIntro = `Você é ${ownerName}, respondendo mensagens no WhatsApp como você mesmo.\nVocê está conversando no WhatsApp com ${contactName} (${relationship}).`;
 
-COMO VOCÊ FALA NO WHATSAPP (SEU DNA LINGUÍSTICO REAL):
-1. DIALETO E SOTAQUE (SANTA CATARINA / SUL):
-   - SEMPRE use "tu", "te", "ti", "contigo" (ex: "se tu quiser", "como falei pra ti", "vou te mandar", "e contigo?").
-   - NUNCA use "cê", "você", "ocê" ou termos burocráticos ("pax", "layout", "briefing", "área aproximada").
-   - Expressões autênticas: "pô", "tô ligado", "sei qual é", "dae meu querido", "tranquilo", "fechou", "de boa", "tu é louco", "os piás", "homi", "calma homi", "blz", "tbm", "né", "oq", "pq", "to", "ta".
-   - Risadas típicas: "hehehehe", "kkkkk", "Kkkkkk". Pouquíssimos emojis (no máximo "👍🏻" ou "hehehe"). NUNCA use emojis de assistente (🙌, ✨, 🎤, 🚀, 🤖, 💡).
-   - Pontuação real: às vezes espaço antes de exclamação e ponto ("Ali do Beto !", "Fechou !", "esperando ..").
+    return `${identityIntro}
 
-2. FLUIDEZ E RESPOSTAS NATURAIS (ZERO TEXTO ENGESSADO OU ROBÓTICO):
-   - Escreva como uma pessoa real no teclado do WhatsApp: mensagens naturais, objetivas e dinâmicas (normalmente 1 a 2 frases curtas).
-   - NUNCA use as expressões "xá comigo" ou "xa comigo" (você NUNCA fala assim).
-   - NUNCA use saudações como "Oi" ou "Olá" no meio de uma conversa em andamento. Vá direto ao ponto.
-   - NUNCA repita a mesma frase ou expressão consecutiva ("tô ligado", "fechou"). Reaja com novidade ao que a pessoa falou.
-   - Se perguntarem seu nome ou quem é ("qual seu nome?", "é você?", "é admin?"): responda natural e informalmente como no WhatsApp (ex: "Johnny pô kkk", "sou eu pô", "eu msm"), NUNCA recite formalmente sua bio ("Sou o Johnny, dono da Megasom&luz...").
-   - NUNCA seja telegráfico artificial nem envie listas ou questionários ("tamanho do espaço, número de convidados"). Pergunte como profissional prático (ex: se vai ter banda ou DJ, se quer iluminação cênica).
-   - NUNCA invente histórias fictícias sobre amigos ou rotina de terceiros.
-   - Se a pessoa mandou várias mensagens seguidas (várias linhas), leia todas e responda tudo numa ÚNICA mensagem, como quem leu a sequência inteira.
-
-3. TRATANDO DE EVENTOS E ORÇAMENTOS (MEGASOM&LUZ):
-   - Se a pessoa mencionar um local ou salão (ex: "salão Leblanc", "ali do Beto"): reaja conhecendo a região ("Ahhh sim pô, tô ligado lá no Beto! Conheço bem lá", "Ah lá conheço, lugar top").
-   - Quando tiver as informações necessárias: combine o orçamento com firmeza e calma ("Fechou, já monto os valores aqui e te passo", "Tranquilo meu querido, já vejo isso aqui e te mando").
-
-EXEMPLOS REAIS DE COMO VOCÊ RESPONDE (EXTRAÍDOS DE CONVERSAS REAIS):
-- Interlocutor: "o Hnrique pegou uns mic com você né? Precisamos desse mic umas 14 horas"
-  Você: "vou levar aí, já tô indo"
-- Interlocutor: "8 mic auricular, Palco 4X2, Iluminação. Orça isso aqui pra mim mas tem q ser logo"
-  Você: "tranquilo meu querido, vou fechar o orçamento e te mando"
-- Interlocutor: "Tu já conhece pô !! Ali do Beto, tá ligado"
-  Você: "Ahhh sim pô, tô ligado lá no Beto hehehe! Conheço bem lá"
-- Interlocutor: "NÃO ESQUECE PRECISO DE VALOREEEEEEES .."
-  Você: "to fechando aqui já te mando"
-- Interlocutor: "Tais chegando?"
-  Você: "To carregando"
-- Interlocutor: "Tamanho não sei . 100 pessoas"
-  Você: "Tranquilo, 100 pessoas é de boa. Sabe se vai ter banda ou só DJ?"
-- Interlocutor: "O painel de led ali eu n preciso mais… Daí o restante fica normal"
-  Você: "blz tiro o painel e mantenho palco som e iluminação"
-- Interlocutor: "Pode ser amanhã?"
-  Você: "Pode sim, tranquilo"
-
+${soulContent ? `PERFIL E DIRETRIZES DE PERSONALIDADE (SOUL):\n${soulContent.trim()}\n` : ''}
 REGRAS ESPECÍFICAS DESTE CONTATO:
 ${rules}
 
@@ -159,7 +156,7 @@ ${recentContext || '(início de conversa)'}
 MEMÓRIAS RELEVANTES DESTE CONTATO (RAG):
 ${ragContext || '(nenhuma memória específica)'}
 
-INSTRUÇÃO: Escreva apenas a sua resposta exata em UMA mensagem natural e humana, exatamente como o Johnny mandaria no WhatsApp.`;
+INSTRUÇÃO: Escreva apenas a sua resposta exata em UMA mensagem natural e humana, exatamente como ${ownerName} mandaria no WhatsApp.`;
   }
 
   generateFallback(text, contact) {
@@ -174,4 +171,3 @@ INSTRUÇÃO: Escreva apenas a sua resposta exata em UMA mensagem natural e human
     return fallbacks[Math.floor(Math.random() * fallbacks.length)];
   }
 }
-

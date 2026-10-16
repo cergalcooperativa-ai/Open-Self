@@ -178,7 +178,7 @@ export class WhatsAppGateway {
       const m = soul.match(/Name:\s*([^\r\n]+)/i) || soul.match(/Nome:\s*([^\r\n]+)/i);
       if (m && m[1].trim()) return m[1].trim();
     } catch {}
-    return this.appConfig?.ownerName || process.env.OPENSELF_NAME || 'Johnny';
+    return this.appConfig?.ownerName || process.env.OPENSELF_NAME || 'Operador';
   }
 
   // Check if global kill-switch is active
@@ -273,7 +273,8 @@ export class WhatsAppGateway {
     if (!msg.message) return;
 
     const jid = msg.key.remoteJid || '';
-    if (jid === 'status@broadcast' || jid.endsWith('@newsletter')) return;
+    const isBroadcast = jid === 'status@broadcast' || jid.endsWith('@newsletter') || jid.endsWith('@broadcast');
+    if (isBroadcast) return;
 
     const text = msg.message.conversation ||
                  msg.message.extendedTextMessage?.text ||
@@ -284,16 +285,20 @@ export class WhatsAppGateway {
     // 1. Skip system events
     if (SYSTEM_EVENT_RE.test(text.trim())) return;
 
+    const isGroup = jid.endsWith('@g.us');
+
     // 2. FROM ME: owner triggers & manual messages (sent from phone)
-    if (msg.key.fromMe) {
+    // Trava Absoluta de Autoridade: processTriggers só pode ser executada se:
+    // - msg.key && msg.key.fromMe === true
+    // - !this.sentIds.has(msg.key.id) (garantindo que mensagens geradas pelo próprio bot nunca acionem gatilhos)
+    // - Não seja mensagem de grupo nem status/broadcast
+    if (msg.key && msg.key.fromMe === true) {
       if (msg.key.id && this.sentIds.has(msg.key.id)) return;
+      if (isGroup) return; // Grupo nunca processa gatilhos de ativação
 
       const { processedText, triggerAction } = this.processTriggers(text);
       const contactName = this.resolveContactKey(msg);
       if (!contactName) return;
-
-      // Owner is typing in this chat: any reply the bot had queued for it is cancelled
-      this._cancelPending(contactName);
 
       if (triggerAction === 'activate') {
         if (!this.jidMap[jid]) {
@@ -301,17 +306,50 @@ export class WhatsAppGateway {
           this.saveJidMap();
         }
         this.setTriggerState(contactName, true);
-        if (processedText) await this.learnFromSelf(contactName, processedText);
-        console.log(chalk.green('   [TRIGGER] Ativado para ' + contactName + ' (pelo dono da sessao)'));
-        // Just-in-Time Personality: build the profile right now from accumulated history
         await this.ensureProfile(contactName);
+
+        // Se após remover o gatilho o texto for vazio (processedText.trim() === ''),
+        // significa sinal silencioso para o bot assumir a conversa e responder pendências!
+        if (processedText.trim() === '') {
+          console.log(chalk.green('   [TRIGGER] Ativado silenciosamente para ' + contactName + ' (assumindo mensagens pendentes)'));
+
+          const normalized = this.normalizeContact(contactName);
+          const session = this.conversationMemory.sessions.get(normalized) || this.conversationMemory.sessions.get(contactName) || [];
+          const pendingThem = [];
+          for (let i = session.length - 1; i >= 0; i--) {
+            if (session[i].clone === '[PENDING_REPLY]') {
+              if (session[i].them) pendingThem.unshift(session[i].them);
+            } else {
+              break;
+            }
+          }
+
+          const pendingBurst = this._pending.get(normalized);
+          if (pendingBurst && pendingBurst.texts.length > 0) {
+            this._flushPending(normalized).catch((e) => console.error(chalk.red('   [TRIGGER] Erro ao disparar resposta: ' + e.message)));
+          } else if (pendingThem.length > 0) {
+            const combinedText = pendingThem.join('\n');
+            await this.queueReply(contactName, combinedText, msg, pendingThem);
+          }
+        } else {
+          // Operador enviou texto real junto com o gatilho (ex: "Vou ver aqui .")
+          this._cancelPending(contactName);
+          await this.learnFromSelf(contactName, processedText);
+          console.log(chalk.green('   [TRIGGER] Ativado para ' + contactName + ' com mensagem do operador'));
+        }
       } else if (triggerAction === 'deactivate') {
+        this._cancelPending(contactName);
         this.setTriggerState(contactName, false);
-        if (processedText) await this.learnFromSelf(contactName, processedText);
+        if (processedText.trim() !== '') {
+          await this.learnFromSelf(contactName, processedText);
+        }
         console.log(chalk.yellow('   [TRIGGER] Desativado para ' + contactName + ' (pelo dono da sessao)'));
       } else {
         // Mensagem normal do dono pelo celular (sem gatilho): registra como fala do operador
-        if (processedText) await this.learnFromSelf(contactName, processedText);
+        this._cancelPending(contactName);
+        if (processedText.trim() !== '') {
+          await this.learnFromSelf(contactName, processedText);
+        }
       }
       return;
     }
@@ -319,9 +357,9 @@ export class WhatsAppGateway {
     this.stats.received++;
 
     // 3. FROM OTHERS - Universal Learning (ALWAYS learns, before any gate).
-    //    Triggers sent by other people are NOT honoured: only the owner can toggle the bot.
+    //    Mensagens de terceiros JAMAIS passam por processTriggers nem alteram trigger-states.
     const normalizedSender = this.resolveContactKey(msg);
-    const { processedText } = this.processTriggers(text);
+    const processedText = text.trim();
     if (!processedText) return;
 
     await this.learnFromContact(normalizedSender, processedText);
@@ -369,17 +407,18 @@ export class WhatsAppGateway {
    * Buffer incoming messages per contact and answer the whole burst once, like a human
    * who reads everything before replying (one reply per message is a bot tell).
    */
-  async queueReply(contactName, text, msg) {
+  async queueReply(contactName, text, msg, batchTexts = null) {
     const key = this.normalizeContact(contactName);
+    const textsToAdd = Array.isArray(batchTexts) && batchTexts.length > 0 ? batchTexts : [text];
     if (this.batchMaxMs <= 0) {
-      return this.generateAndSendReply(contactName, text, msg, [text]);
+      return this.generateAndSendReply(contactName, textsToAdd.join('\n'), msg, textsToAdd);
     }
     let p = this._pending.get(key);
     if (!p) {
       p = { contactName, texts: [], firstAt: Date.now(), msg, timer: null, deferred: false };
       this._pending.set(key, p);
     }
-    p.texts.push(text);
+    p.texts.push(...textsToAdd);
     p.msg = msg;
     this._armBatchTimer(key);
     if (p.texts.length > 1) {
@@ -693,6 +732,10 @@ export class WhatsAppGateway {
         try {
           await this.sock.readMessages([msg.key]);
         } catch {}
+
+        for (let i = 0; i < result.replies.length; i++) {
+          result.replies[i] = result.replies[i].replace(/\s+[.,]$/g, '').trim();
+        }
 
         const fullReply = result.replies.join(' ');
 
