@@ -59,6 +59,7 @@ export function cleanAIReveal(text) {
         /agrade[çc]o (a |pela )?(sua )?(paci[êe]ncia|compreens[ãa]o)[.!]?\s*/gi,
         /entendo (a )?(sua )?preocupa[çc][ãa]o[.!]?\s*/gi,
         /estou (aqui )?(para|pra) (te )?ajudar[.!]?\s*/gi,
+        /[,.]?\s*\bx[aá] comigo!?\s*/gi,
     ];
 
     for (const pattern of cleanPatterns) {
