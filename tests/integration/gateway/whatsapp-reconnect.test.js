@@ -28,6 +28,7 @@ vi.mock('@whiskeysockets/baileys', () => {
             saveCreds: vi.fn(),
         }),
         DisconnectReason: { loggedOut: 401 },
+        downloadMediaMessage: vi.fn(),
     };
 });
 

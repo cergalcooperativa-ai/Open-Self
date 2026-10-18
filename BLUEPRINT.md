@@ -3,10 +3,10 @@
 > **Documento Mestre de Reconstrução Integral**  
 > Este documento contém a especificação exata, arquitetural, algorítmica e operacional para permitir que qualquer agente autônomo ou desenvolvedor reconstrua o **Open-Self** do zero absoluto, obtendo 100% de paridade comportamental, técnica e de segurança com a versão ativa em produção.
 >
-> **Última Atualização:** 2026-10-16  
-> **Status:** Produção Ativa (Daemon Systemd permanente, Open-Self v1.2.0, Node.js v22.x, 714 testes / 75 arquivos aprovados)
+> **Última Atualização:** 2026-10-18  
+> **Status:** Produção Ativa (Daemon Systemd permanente, Open-Self v1.3.0, Node.js v22.x, 718 testes / 75 arquivos aprovados)
 >
-> **Revisão verificada contra produção:** 2026-10-16 — estado real cruzado com systemctl, npm test e data/*.json (seção 9). Protocolo de manutenção: seção 10.
+> **Revisão verificada contra produção:** 2026-10-18 — estado real cruzado com systemctl, npm test e data/*.json (seção 9). Protocolo de manutenção: seção 10.
 
 ---
 
@@ -108,7 +108,7 @@ Open-Self/
 ├── package.json                        # Definição de dependências e scripts
 ├── vitest.config.js                    # Configuração de testes automatizados
 ├── scripts/                            # Benchmarks e evals (benchmark-context, eval-compiler, evaluate-*)
-├── tests/                              # 75 arquivos de teste (vitest, 714 testes)
+├── tests/                              # 75 arquivos de teste (vitest, 718 testes aprovados)
 ├── .env                                # Chaves de API e configurações de runtime (chmod 600)
 ├── /etc/systemd/system/
 │   └── openself-gateway.service        # Unidade daemon systemd permanente
@@ -121,7 +121,7 @@ Open-Self/
 │   ├── conversation-sessions.json      # Memória de curto prazo (últimas 20 trocas)
 │   ├── conversations.json              # Exports brutos ingeridos (lista, 100 trocas)
 │   ├── personality.json                # Estatísticas de estilo do dono (263 msgs analisadas)
-│   ├── heartbeat.json                  # Estado online/lastSeen do daemon
+│   ├── heartbeat.json                  # Estado online/lastSeen e timestamp ativo do operador
 │   ├── memory.md                       # Log auditável de trocas em Markdown
 │   ├── gateway.log                     # Log do daemon systemd em produção
 │   ├── memory-index/                   # Banco vetorial RAG
@@ -135,7 +135,7 @@ Open-Self/
     │   ├── start.js                    # Inicializador de gateways
     │   └── utils/error-handler.js      # Tratamento central de erros do CLI
     ├── gateway/
-    │   └── whatsapp.js                 # Gateway Baileys, reconexão, batch e JIT
+    │   └── whatsapp.js                 # Gateway Baileys, reconexão, batch, JIT, áudio Whisper e heartbeat
     ├── pipeline/
     │   └── clone.js                    # Orquestrador do clone, montagem de prompt e RAG
     ├── memory/
@@ -239,6 +239,29 @@ async learnFromSelf(contactName, text) {
   }
 }
 ```
+
+#### 5.1.4 Transcrição Automática de Áudios (Whisper na Groq)
+O gateway intercepta mensagens contendo notas de voz ou arquivos de áudio (`msg.message?.audioMessage` ou em mensagens temporárias/efêmeras) através do método `downloadMediaMessage` do Baileys:
+* **Endpoint de Transcrição:** Utiliza o cliente oficial OpenAI conectado à infraestrutura Groq (`whisper-large-v3-turbo`) através das variáveis de ambiente `OPENAI_BASE_URL` (`https://api.groq.com/openai/v1`) e `OPENAI_API_KEY`.
+* **Formato e Conversão:** Converte o buffer de áudio em arquivo Ogg (`toFile(audioBuffer, 'audio.ogg', { type: 'audio/ogg' })`) e despacha para a API de transcrição.
+* **Isolamento e Paridade Textual:** O texto transcrito substitui a mensagem de áudio e é processado como texto comum:
+  * Se enviado por terceiros, é indexado no RAG isolado do contato e adicionado à memória de curto prazo sem prefixos artificiais (ex: sem tags como `[áudio]`).
+  * Se enviado pelo próprio operador (`fromMe === true`), é registrado através de `learnFromSelf()`, ensinando o clone o vocabulário e o estilo falado do titular.
+
+#### 5.1.5 Atualização Ativa do Heartbeat e Cooldown de Operador (Ghost Mode Coerente)
+Para manter coerência no modo fantasma e evitar que o clone responda em paralelo enquanto o titular utiliza ativamente o WhatsApp:
+* **Escrita Ativa em `data/heartbeat.json`:** Sempre que qualquer mensagem legítima do operador for detectada (`msg.key && msg.key.fromMe === true` que não seja eco do próprio bot via `sentIds`), o gateway grava imediatamente:
+  ```json
+  {
+    "online": true,
+    "lastSeen": "<ISO timestamp>",
+    "timestamp": <Date.now()>
+  }
+  ```
+* **Cooldown de 3 Minutos:** Caso o operador tenha enviado qualquer mensagem manual nos últimos 3 minutos (`operatorCooldownMs = 180000`), as respostas do clone para qualquer chat aguardam o restante desse intervalo (`await this.sleep(operatorCooldown)`):
+  * **Prevenção de Colisão:** O clone não fala por cima do operador enquanto ele estiver com o aparelho aberto digitando.
+  * **Cancelamento Inteligente:** Se durante esse intervalo o operador responder àquele chat ou desativar o bot (`" ,"`), a fila pendente é imediatamente cancelada ou abortada.
+  * **Exceção Soberana:** Mensagens de ativação explícita silenciosa (`" ."` sem texto adicional) zeram o cooldown para permitir que o bot assuma o chat pendente de imediato.
 
 ---
 

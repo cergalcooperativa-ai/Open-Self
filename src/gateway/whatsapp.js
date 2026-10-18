@@ -19,7 +19,8 @@ import { ChatMemory } from '../memory/rag.js';
 import { ClonePipeline } from '../pipeline/clone.js';
 import { GhostMode } from '../ghost/ghost.js';
 import { createProvider, autoDetectProvider } from '../brain/router.js';
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import OpenAI, { toFile } from 'openai';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMessage } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 
@@ -73,6 +74,13 @@ export class WhatsAppGateway {
     this.triggersFile = join(dataDir, 'trigger-states.json');
     this.jidMapFile = join(dataDir, 'jid-map.json');
     this.responsesDisabledFile = join(dataDir, 'RESPONSES_DISABLED');
+    this.heartbeatFile = join(dataDir, 'heartbeat.json');
+
+    // Operator presence & audio helpers
+    this.downloadMediaMessage = finalConfig.downloadMediaMessage || downloadMediaMessage;
+    this.toFile = finalConfig.toFile || toFile;
+    this.operatorCooldownMs = Number(process.env.OPENSELF_OPERATOR_COOLDOWN_MS ?? 180000);
+    this._lastOperatorActivity = 0;
 
     // ids of messages sent by the bot itself (echoes must never be read as owner triggers)
     this.sentIds = new Set();
@@ -163,6 +171,78 @@ export class WhatsAppGateway {
 
   _ensureDataDir() {
     if (!existsSync(this.dataDir)) mkdirSync(this.dataDir, { recursive: true });
+  }
+
+  // Record active heartbeat and operator activity
+  recordHeartbeat() {
+    try {
+      const now = this.now ? this.now() : new Date();
+      const ts = now.getTime();
+      this._lastOperatorActivity = ts;
+      const data = {
+        online: true,
+        lastSeen: now.toISOString(),
+        timestamp: ts
+      };
+      this._ensureDataDir();
+      writeFileSync(this.heartbeatFile, JSON.stringify(data, null, 2), 'utf-8');
+      if (this.ghost && typeof this.ghost.ping === 'function') {
+        this.ghost.ping();
+      }
+    } catch (e) {
+      console.log(chalk.yellow('   [HEARTBEAT] Falha ao gravar heartbeat: ' + e.message));
+    }
+  }
+
+  // Remaining ms of the 3-minute cooldown after the operator's last manual message
+  getOperatorCooldownRemaining() {
+    let lastActivity = this._lastOperatorActivity;
+    if (!lastActivity) {
+      try {
+        if (existsSync(this.heartbeatFile)) {
+          const hb = JSON.parse(readFileSync(this.heartbeatFile, 'utf-8'));
+          if (hb?.timestamp) lastActivity = Number(hb.timestamp);
+        }
+      } catch {}
+    }
+    if (!lastActivity) return 0;
+    const now = this.now ? this.now().getTime() : Date.now();
+    const elapsed = now - lastActivity;
+    const cooldown = this.operatorCooldownMs;
+    const remaining = cooldown - elapsed;
+    return remaining > 0 ? remaining : 0;
+  }
+
+  // Automatic Audio Transcription via Groq (whisper-large-v3-turbo)
+  async transcribeAudio(audioBuffer) {
+    if (!audioBuffer || audioBuffer.length === 0) return '';
+    try {
+      const apiKey = process.env.OPENAI_API_KEY || this.appConfig.openaiApiKey;
+      const baseURL = process.env.OPENAI_BASE_URL || this.appConfig.openaiBaseUrl || 'https://api.groq.com/openai/v1';
+      if (!apiKey) {
+        console.log(chalk.yellow('   [WHISPER] OPENAI_API_KEY nao configurada para transcricao'));
+        return '';
+      }
+      if (!this._openaiClient || this._openaiKey !== apiKey || this._openaiBaseURL !== baseURL) {
+        this._openaiKey = apiKey;
+        this._openaiBaseURL = baseURL;
+        this._openaiClient = new OpenAI({ apiKey, baseURL });
+      }
+      const toFileFn = this.toFile || toFile;
+      const file = await toFileFn(audioBuffer, 'audio.ogg', { type: 'audio/ogg' });
+      const res = await this._openaiClient.audio.transcriptions.create({
+        file,
+        model: process.env.OPENSELF_WHISPER_MODEL || 'whisper-large-v3-turbo'
+      });
+      const transcript = res?.text?.trim() || '';
+      if (transcript) {
+        console.log(chalk.cyan('   [WHISPER] Audio transcrito: "' + (transcript.length > 60 ? transcript.slice(0, 60) + '...' : transcript) + '"'));
+      }
+      return transcript;
+    } catch (e) {
+      console.log(chalk.yellow('   [WHISPER] Falha ao transcrever audio: ' + e.message));
+      return '';
+    }
   }
 
   // Normalize contact name (strip ~ prefix from BR exports)
@@ -276,9 +356,26 @@ export class WhatsAppGateway {
     const isBroadcast = jid === 'status@broadcast' || jid.endsWith('@newsletter') || jid.endsWith('@broadcast');
     if (isBroadcast) return;
 
-    const text = msg.message.conversation ||
+    let text = msg.message.conversation ||
                  msg.message.extendedTextMessage?.text ||
                  msg.message.imageMessage?.caption || '';
+
+    // Interceptação automática de áudio via Whisper (Groq)
+    const audioMsg = msg.message.audioMessage || msg.message.ephemeralMessage?.message?.audioMessage;
+    if (audioMsg) {
+      try {
+        const downloadFn = this.downloadMediaMessage || downloadMediaMessage;
+        const audioBuffer = await downloadFn(msg, 'buffer', {});
+        if (audioBuffer) {
+          const transcribed = await this.transcribeAudio(audioBuffer);
+          if (transcribed) {
+            text = transcribed;
+          }
+        }
+      } catch (err) {
+        console.log(chalk.yellow('   [WHISPER] Erro ao processar midia de audio: ' + err.message));
+      }
+    }
 
     if (!text.trim()) return;
 
@@ -296,6 +393,9 @@ export class WhatsAppGateway {
       if (msg.key.id && this.sentIds.has(msg.key.id)) return;
       if (isGroup) return; // Grupo nunca processa gatilhos de ativação
 
+      // Atualização Ativa do Heartbeat: operador enviou mensagem pelo celular
+      this.recordHeartbeat();
+
       const { processedText, triggerAction } = this.processTriggers(text);
       const contactName = this.resolveContactKey(msg);
       if (!contactName) return;
@@ -311,6 +411,7 @@ export class WhatsAppGateway {
         // Se após remover o gatilho o texto for vazio (processedText.trim() === ''),
         // significa sinal silencioso para o bot assumir a conversa e responder pendências!
         if (processedText.trim() === '') {
+          this._lastOperatorActivity = 0; // Handover explícito: libera o clone para responder imediatamente
           console.log(chalk.green('   [TRIGGER] Ativado silenciosamente para ' + contactName + ' (assumindo mensagens pendentes)'));
 
           const normalized = this.normalizeContact(contactName);
@@ -704,6 +805,23 @@ export class WhatsAppGateway {
       }
 
       if (result.action === 'reply' && result.replies.length > 0) {
+        // Cooldown de 3 minutos de inatividade do operador antes de o clone responder em paralelo
+        const operatorCooldown = this.getOperatorCooldownRemaining();
+        if (operatorCooldown > 0) {
+          console.log(chalk.cyan(`   [GHOST] Operador ativo nos ultimos 3min. Aguardando ${(operatorCooldown/1000).toFixed(0)}s de intervalo...`));
+          await this.sleep(operatorCooldown);
+
+          // Verificar se durante a espera o operador assumiu, desativou o bot ou acionou kill-switch
+          if (this.isGloballyDisabled() || !this.getTriggerState(normalizedContact)) {
+            this.stats.ignored++;
+            return { aborted: true };
+          }
+          if (this._pending.get(normalizedContact)?.texts.length) {
+            console.log(chalk.gray('   [BATCH] chegou mais mensagem de ' + contactName + ' durante a espera - unificando resposta'));
+            return { superseded: true };
+          }
+        }
+
         // Natural human delay: notice + read message before typing.
         // Fast mode (testing): OPENSELF_FAST_REPLY=1 uses 2-4s.
         // Normal mode (production human mimicry): 10s to 30s.

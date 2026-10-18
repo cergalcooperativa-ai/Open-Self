@@ -420,3 +420,123 @@ describe('WhatsAppGateway — message batching (burst => one reply)', () => {
         expect(sock.sendMessage).toHaveBeenCalledTimes(2);
     });
 });
+
+describe('WhatsAppGateway — audio transcription and heartbeat maintenance', () => {
+    let root, dataDir, gw, sock, brain;
+
+    beforeEach(() => {
+        root = mkdtempSync(join(tmpdir(), 'openself-audio-'));
+        dataDir = join(root, 'data');
+        brain = { generate: vi.fn(async () => 'beleza pura') };
+        const pipeline = new ClonePipeline({ dataDir, config: {} });
+        pipeline.setBrain(brain);
+        gw = new WhatsAppGateway({
+            dataDir,
+            sessionDir: join(dataDir, 'whatsapp-session'),
+            pipeline,
+            ghost: { getStatus: () => ({ ghostMode: false }), shouldCloneReply: () => true },
+        });
+        pipeline.setMemory(gw.conversationMemory, gw.chatMemory);
+        sock = {
+            user: { id: 'me@s.whatsapp.net' },
+            readMessages: vi.fn(async () => {}),
+            presenceSubscribe: vi.fn(async () => {}),
+            sendPresenceUpdate: vi.fn(async () => {}),
+            sendMessage: vi.fn(async () => ({ key: { id: 'BOT-' + Math.random() } })),
+        };
+        gw.sock = sock;
+        gw.sleep = vi.fn(async () => {});
+        gw.batchMaxMs = 0; // reply immediately
+    });
+
+    afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+    it('transcribes incoming audioMessage and processes as plain text without artificial prefixes', async () => {
+        const audioMsg = {
+            key: { remoteJid: JID, fromMe: false, id: 'AUDIO_1' },
+            pushName: 'Maria',
+            message: {
+                audioMessage: {
+                    mimetype: 'audio/ogg; codecs=opus',
+                    seconds: 8,
+                },
+            },
+        };
+
+        const fakeBuffer = Buffer.from('fake-ogg-audio');
+        gw.downloadMediaMessage = vi.fn(async () => fakeBuffer);
+        gw.transcribeAudio = vi.fn(async () => 'oi johnny tem horario sabado');
+
+        await gw.handleMessage(audioMsg);
+
+        expect(gw.downloadMediaMessage).toHaveBeenCalledWith(audioMsg, 'buffer', {});
+        expect(gw.transcribeAudio).toHaveBeenCalledWith(fakeBuffer);
+
+        const memories = await gw.chatMemory.findRelevant('', 'Maria', 10);
+        expect(memories.map((m) => m.theirMessage)).toContain('oi johnny tem horario sabado');
+
+        const session = gw.conversationMemory.getRecentContext('Maria', 10);
+        expect(session).toContain('Maria: oi johnny tem horario sabado');
+        expect(session).not.toMatch(/\[áudio\]|\[audio\]/i);
+    });
+
+    it('transcribes owner audioMessage (fromMe === true) and records via learnFromSelf', async () => {
+        await gw.handleMessage(incoming('onde tu ta?', 'IN_1'));
+
+        const ownerAudio = {
+            key: { remoteJid: JID, fromMe: true, id: 'OWNER_AUDIO_1' },
+            message: {
+                audioMessage: {
+                    mimetype: 'audio/ogg; codecs=opus',
+                    seconds: 4,
+                },
+            },
+        };
+
+        gw.downloadMediaMessage = vi.fn(async () => Buffer.from('owner-audio'));
+        gw.transcribeAudio = vi.fn(async () => 'to saindo com o caminhao');
+
+        await gw.handleMessage(ownerAudio);
+
+        const session = gw.conversationMemory.getRecentContext('Maria', 10);
+        expect(session).toContain('You: to saindo com o caminhao');
+        expect(session).not.toMatch(/\[áudio\]|\[audio\]/i);
+    });
+
+    it('updates data/heartbeat.json whenever msg.key.fromMe === true', async () => {
+        const heartbeatFile = join(dataDir, 'heartbeat.json');
+        expect(existsSync(heartbeatFile)).toBe(false);
+
+        await gw.handleMessage(own('estou online', 'M10'));
+
+        expect(existsSync(heartbeatFile)).toBe(true);
+        const data = JSON.parse(readFileSync(heartbeatFile, 'utf-8'));
+        expect(data.online).toBe(true);
+        expect(typeof data.timestamp).toBe('number');
+        expect(typeof data.lastSeen).toBe('string');
+        expect(Date.now() - data.timestamp).toBeLessThan(5000);
+    });
+
+    it('waits for operator cooldown before replying when operator sent a message in the last 3 minutes', async () => {
+        // Activate bot
+        gw.setTriggerState('Maria', true);
+
+        // Operator sent a message 1 minute ago (120s cooldown remaining)
+        const twoMinutesAgo = Date.now() - 60000;
+        gw._lastOperatorActivity = twoMinutesAgo;
+        gw.operatorCooldownMs = 180000;
+
+        const remaining = gw.getOperatorCooldownRemaining();
+        expect(remaining).toBeGreaterThan(115000);
+        expect(remaining).toBeLessThanOrEqual(120000);
+
+        await gw.handleMessage(incoming('preciso de som pro culto', 'A55'));
+
+        // gw.sleep should have been called with the operator cooldown
+        expect(gw.sleep).toHaveBeenCalled();
+        const sleepCallMs = gw.sleep.mock.calls.find((call) => call[0] >= 115000);
+        expect(sleepCallMs).toBeDefined();
+        expect(sock.sendMessage).toHaveBeenCalledTimes(1);
+    });
+});
+
