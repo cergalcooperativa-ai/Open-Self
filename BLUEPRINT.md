@@ -279,7 +279,16 @@ Todo o DNA linguístico (sotaque catarinense, expressões autênticas, regras de
 * **Exemplos Sanitizados:** Todos os exemplos foram limpos (ex: `"Tamanho não sei, 100 pessoas"` em vez de ponto final com espaço).
 * **Filtro Anti-Gatilho na Saída:** Em `generateAndSendReply`, qualquer ` .` ou ` ,` gerado acidentalmente no fim da frase é sanitizado com `reply.replace(/\s+[.,]$/g, '').trim()` antes do envio.
 
-#### 5.2.2 Filtragem de RAG Útil
+#### 5.2.3 Tratamento de Lacunas de Tempo Real (Localização, Prazos e Compromissos)
+Para evitar que o LLM alucine dados factuais inexistentes quando questionado sobre o presente imediato ou compromissos pendentes:
+* **Proibição de Inventar:** NUNCA inventar horários, locais exatos ou confirmações de tarefas sem certeza absoluta.
+* **Vagueza Natural da Correria:**
+  * Localização ("onde tá?"): `"Trabalhando"`, `"na correria por aí"`, `"to na atividade"`.
+  * Contratos / Prazos ("fez?"): `"tô fechando isso hoje"`, `"deixa comigo que já vejo"`, `"tá no jeito, logo te mando"`.
+  * Encontros ("vem aqui hoje?"): `"vou ver como vai ficar a correria aqui e te aviso"`, `"tamo na correria, mais tarde nos falamos"`.
+* **Desvio com Gancho Humano:** Se houver insistência, jogar o alinhamento para mais tarde sem quebrar o disfarce: `"me chama mais tarde que te confirmo certinho"`.
+
+#### 5.2.4 Filtragem de RAG Útil
 O pipeline filtra memórias para garantir que entradas de escuta passiva ainda não respondidas (`yourReply == ""`) não poluam o prompt:
 ```javascript
 let ragContext = '';
