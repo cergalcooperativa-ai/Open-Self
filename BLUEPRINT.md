@@ -4,7 +4,9 @@
 > Este documento contém a especificação exata, arquitetural, algorítmica e operacional para permitir que qualquer agente autônomo ou desenvolvedor reconstrua o **Open-Self** do zero absoluto, obtendo 100% de paridade comportamental, técnica e de segurança com a versão ativa em produção.
 >
 > **Última Atualização:** 2026-10-16  
-> **Status:** Produção Ativa (Daemon Permanente Systemd, Node.js v22.x, 707 testes automatizados aprovados)
+> **Status:** Produção Ativa (Daemon Systemd permanente, Open-Self v1.2.0, Node.js v22.x, 714 testes / 75 arquivos aprovados)
+>
+> **Revisão verificada contra produção:** 2026-10-16 — estado real cruzado com systemctl, npm test e data/*.json (seção 9). Protocolo de manutenção: seção 10.
 
 ---
 
@@ -23,8 +25,8 @@ O **Open-Self** é um clone digital de personalidade humana para WhatsApp basead
 ## 2. Invariantes de Segurança e Regras Operacionais
 
 1. **Soberania do Gatilho do Dono:**
-   * `texto .` ou `.` enviado pelo celular do dono $\rightarrow$ **ATIVA** o clone para aquele contato.
-   * `texto ,` ou `,` enviado pelo celular do dono $\rightarrow$ **DESATIVA** o clone (volta ao silêncio absoluto).
+   * `texto .` ou `.` enviado pelo celular do dono → **ATIVA** o clone para aquele contato.
+   * `texto ,` ou `,` enviado pelo celular do dono → **DESATIVA** o clone (volta ao silêncio absoluto).
    * Gatilhos enviados por terceiros são **ignorados com desprezo**.
    * Pontuação natural enviada pelo dono sem espaço anterior (ex.: `blz.`, `ok...`, `1.5`, `sim,`) **nunca** dispara ativação/desativação.
 2. **Padrão Absoluto = Silêncio:** Se o contato não possuir estado `true` em `data/trigger-states.json`, o gateway descarta qualquer tentativa de resposta.
@@ -105,21 +107,28 @@ Open-Self/
 ├── AGENTS.md                           # Guia operacional de agentes
 ├── package.json                        # Definição de dependências e scripts
 ├── vitest.config.js                    # Configuração de testes automatizados
+├── scripts/                            # Benchmarks e evals (benchmark-context, eval-compiler, evaluate-*)
+├── tests/                              # 75 arquivos de teste (vitest, 714 testes)
 ├── .env                                # Chaves de API e configurações de runtime (chmod 600)
 ├── /etc/systemd/system/
 │   └── openself-gateway.service        # Unidade daemon systemd permanente
 ├── data/                               # Diretório de dados de runtime (ignorado pelo git)
 │   ├── SOUL.md                         # Persona central e regras de comportamento
+│   ├── SOUL.auto.md                    # Rascunho de SOUL gerado automaticamente (não usar em produção)
 │   ├── contacts.json                   # Perfis e regras personalizadas por contato
 │   ├── trigger-states.json             # Estado booleano de ativação por contato
 │   ├── jid-map.json                    # Mapeamento dinâmico LID/JID <-> Nome
 │   ├── conversation-sessions.json      # Memória de curto prazo (últimas 20 trocas)
+│   ├── conversations.json              # Exports brutos ingeridos (lista, 100 trocas)
+│   ├── personality.json                # Estatísticas de estilo do dono (263 msgs analisadas)
+│   ├── heartbeat.json                  # Estado online/lastSeen do daemon
 │   ├── memory.md                       # Log auditável de trocas em Markdown
 │   ├── gateway.log                     # Log do daemon systemd em produção
 │   ├── memory-index/                   # Banco vetorial RAG
 │   │   ├── metadata.json               # Metadados de mensagens ({contact, theirMessage, yourReply})
 │   │   └── vectors.json                # Vetores Bag-of-Words normalizados
-│   └── whatsapp-session/               # Credenciais de autenticação Baileys (chmod 700)
+│   ├── whatsapp-session/               # Credenciais de autenticação Baileys (chmod 700)
+│   └── whatsapp-session.unreg.*/       # Backups de sessões não-registradas (preservar)
 └── src/
     ├── cli/                            # Interface de linha de comando
     │   ├── index.js                    # Entrypoint CLI (`openself start --whatsapp`)
@@ -414,6 +423,8 @@ TimeoutStopSec=15s
 WantedBy=multi-user.target
 ```
 
+> **Nota OrbStack (verificada em produção):** esta unit roda ACTIVE+ENABLED na VM mesmo com `Wants=network-online.target`. Se o serviço um dia travar em `activating` (quirk OrbStack: networkd-wait-online pode nunca sinalizar), remova as linhas `network-online.target` — `After=network.target` basta.
+
 ### 7.2 Comandos Operacionais de Gestão
 ```bash
 # Recarregar configuração do systemd
@@ -457,9 +468,12 @@ npm install
 Crie o arquivo `.env` com permissão restrita:
 ```bash
 cat << 'EOF' > .env
-OPENAI_API_KEY=sua-chave-openai-aqui
 LLM_PROVIDER=openai
-LLM_MODEL=gpt-4o-mini
+# ATENÇÃO — PROVIDER REAL = GROQ via endpoint compatível OpenAI (NUNCA OpenAI direto):
+OPENAI_API_KEY=gsk_sua-chave-groq-aqui
+OPENAI_BASE_URL=https://api.groq.com/openai/v1
+LLM_MODEL=openai/gpt-oss-120b
+OPENSELF_USER_NAME=Megasom&luz
 OPENSELF_MIN_DELAY=10000
 OPENSELF_MAX_DELAY=28000
 OPENSELF_BATCH_MIN_MS=5000
@@ -476,6 +490,7 @@ echo "{}" > data/contacts.json
 echo "{}" > data/trigger-states.json
 echo "{}" > data/jid-map.json
 echo "{}" > data/conversation-sessions.json
+echo "[]" > data/conversations.json
 echo "[]" > data/memory-index/metadata.json
 echo "[]" > data/memory-index/vectors.json
 ```
@@ -484,7 +499,7 @@ echo "[]" > data/memory-index/vectors.json
 Certifique-se de que todos os testes passem:
 ```bash
 npm test
-# Resultado esperado: 74 test files passed, 707 tests passed
+# Resultado esperado: 75 test files passed, 714 tests passed
 ```
 
 ### Passo 6: Inicialização e Pareamento WhatsApp
@@ -493,7 +508,7 @@ Inicie em modo interativo uma vez para gerar e escanear o QR code:
 node src/cli/index.js start --whatsapp
 ```
 * O terminal exibirá o QR Code (e salvará em `qr_whatsapp.png`).
-* No celular: **WhatsApp $\rightarrow$ Aparelhos conectados $\rightarrow$ Conectar aparelho**.
+* No celular: **WhatsApp → Aparelhos conectados → Conectar aparelho**.
 * Uma vez autenticado, encerre com `Ctrl+C`. A sessão fica gravada em `data/whatsapp-session/`.
 
 ### Passo 7: Instalação e Ativação do Daemon Permanente
@@ -533,3 +548,42 @@ tail -n 20 /home/user/Open-Self/data/gateway.log
 # Deve conter: "✅ WhatsApp conectado! Escuta passiva ativa - respostas somente em chats ativados com ' .'"
 ```
 Pronto! A ferramenta estará 100% reconstruída, segura, autônoma e idêntica à versão de produção.
+
+
+---
+
+## 9. Estado de Produção Verificado (snapshot gerado ao vivo: 2026-10-17 21:38 -03)
+
+| Item | Estado real |
+|---|---|
+| Serviço systemd | `active` / enabled=enabled, PID 56852, uptime 1-04:44:07, cgroup `system.slice/openself-gateway.service` |
+| Gateway | `node src/cli/index.js start --whatsapp` (unit `/etc/systemd/system/openself-gateway.service`) |
+| Sessão WhatsApp | me=`554899036346:20@s.whatsapp.net`, registered=`False` (sessão funcional; backup preservado em `whatsapp-session.unreg.1791953900/`) |
+| Gatilhos (trigger-states.json) | `{
+  "Johnny Teste": true,
+  "Diana": false
+}` |
+| Contatos com perfil isolado | Neia (2241 msgs); Tayla Moreno dos Santos (103 msgs); Edlayne (395 msgs); Johnny Teste (0 msgs); Levi (18 msgs); Diana (8 msgs) |
+| LLM Brain | Groq `gpt-oss-120b` via endpoint compatível OpenAI (`OPENAI_BASE_URL=https://api.groq.com/openai/v1`) |
+| Personalidade base | 263 mensagens analisadas (`personality.json`); `SOUL.auto.md` rascunho PT 63% / ES 26% |
+| Testes | 714/714 passando (75 arquivos) — verificado 2026-10-16 |
+| Legacy | `personaclone.service` = inactive (Digital-Personality-Clone descontinuado; Open-Self é o sucessor) |
+| Manutenção pendente | `heartbeat.json` stale (lastSeen 2026-10-11) — monitorar |
+
+Últimas linhas do log de produção:
+```
+[LEARN] Mensagem de Diana salva (memoria + RAG isolado)
+   [LEARN] Mensagem de Diana salva (memoria + RAG isolado)
+```
+
+---
+
+## 10. Protocolo de Manutenção — Fonte Única de Verdade
+
+> **REGRA MÁXIMA:** Este arquivo é a FONTE ÚNICA DE VERDADE da ferramenta Open-Self. Nenhuma memória de sessão, skill ou contexto de agente substitui este documento.
+
+1. **Todo agente autônomo (Hermes, CLI, subagente) DEVE ler este arquivo ANTES de operar, modificar ou reconstruir a ferramenta** — e re-verificar contra o estado real: `systemctl status openself-gateway`, `npm test`, conteúdo de `data/*.json`, e `.env` (com secrets redigidos). Se documento e realidade divergirem, a realidade manda — e o documento é corrigido no mesmo commit.
+2. **Toda evolução (feature, fix, mudança de config ou infra) DEVE atualizar este documento no mesmo commit** (`docs(blueprint): ...`). A seção 9 (snapshot ao vivo) é regenerada a cada mudança relevante — o script de sync lê o estado real, nunca inventa.
+3. **Isolamento absoluto de contexto:** configurações do Open-Self (máquina "VM") NUNCA se misturam com configurações do Hermes Agent (guest "ubuntu", `~/.hermes`). São sistemas distintos em máquinas distintas. Este documento contém apenas o Open-Self.
+4. **Disinformações corrigidas na revisão 2026-10-16:** exemplo `.env` apontava OpenAI direto (o provider real é Groq/gpt-oss-120b); contagem de testes 707→714 (75 arquivos); inventário `data/` incompleto (faltavam conversations.json, personality.json, heartbeat.json, SOUL.auto.md, backups .unreg); runbook sem init de `conversations.json`.
+5. **Secrets:** este documento NUNCA contém chaves reais — apenas placeholders (`gsk_sua-chave-groq-aqui`). Chaves vivem exclusivamente em `.env` (chmod 600), fora do git.
