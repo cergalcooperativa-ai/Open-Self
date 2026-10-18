@@ -50,4 +50,52 @@ describe('ClonePipeline — Decoupled & Agnostic Pipeline', () => {
     expect(prompt).not.toContain('Johnny');
     expect(prompt).not.toContain('Megasom&luz');
   });
+
+  it('injects transientDirective when active and not expired', () => {
+    const pipeline = new ClonePipeline({ dataDir: root });
+    const future = new Date(Date.now() + 3600000).toISOString();
+    const prompt = pipeline.buildSystemPrompt({
+      name: 'Levi',
+      relationship: 'cliente',
+      rules: 'Seja breve.',
+      transientDirective: {
+        directive: 'conduza para fechar o som sem o painel de LED por 800',
+        createdAt: new Date().toISOString(),
+        expiresAt: future
+      }
+    });
+
+    expect(prompt).toContain('🎯 OBJETIVO ATUAL DEFINIDO PELO OPERADOR PARA ESTA CONVERSA:');
+    expect(prompt).toContain('conduza para fechar o som sem o painel de LED por 800');
+    expect(prompt).toContain('Conduza o diálogo com naturalidade e brevidade para atingir esse objetivo');
+  });
+
+  it('does NOT inject transientDirective when expired', () => {
+    const pipeline = new ClonePipeline({ dataDir: root });
+    const past = new Date(Date.now() - 3600000).toISOString();
+    const prompt = pipeline.buildSystemPrompt({
+      name: 'Levi',
+      relationship: 'cliente',
+      rules: 'Seja breve.',
+      transientDirective: {
+        directive: 'diretriz expirada antiga',
+        createdAt: new Date(Date.now() - 7200000).toISOString(),
+        expiresAt: past
+      }
+    });
+
+    expect(prompt).not.toContain('🎯 OBJETIVO ATUAL DEFINIDO PELO OPERADOR');
+    expect(prompt).not.toContain('diretriz expirada antiga');
+  });
+
+  it('generateFallback uses deflection fallback for risk questions', () => {
+    const pipeline = new ClonePipeline({ dataDir: root });
+    const reply1 = pipeline.generateFallback('que horas tu vem aqui?');
+    const reply2 = pipeline.generateFallback('onde tu tá?');
+    const reply3 = pipeline.generateFallback('fez o contrato?');
+
+    expect(reply1).toBe('to na correria aqui na rua, mais tarde te confirmo certinho');
+    expect(reply2).toBe('to na correria aqui na rua, mais tarde te confirmo certinho');
+    expect(reply3).toBe('to na correria aqui na rua, mais tarde te confirmo certinho');
+  });
 });

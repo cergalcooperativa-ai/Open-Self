@@ -23,6 +23,7 @@ import OpenAI, { toFile } from 'openai';
 import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMessage } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
+import { AdminController } from './admin-controller.js';
 
 const SYSTEM_EVENT_RE =
   /^(mensagem apagada|mensagem editada|voc\u00ea apagou|\u00e1udio ocultado|imagem ocultada|v\u00eddeo omitido|liga\u00e7\u00e3o de voz( perdida| silenciada)?|missed (voice|video) call|you deleted|this message was deleted)/i;
@@ -86,6 +87,10 @@ export class WhatsAppGateway {
     this.sentIds = new Set();
     this._jitInFlight = new Map();
     this._stopped = false;
+
+    // Self-Chat Control Panel (v1.4.0)
+    this.sessionOwnerNumber = finalConfig.sessionOwnerNumber || process.env.OPENSELF_OWNER_NUMBER || null;
+    this.adminController = finalConfig.adminController || new AdminController(this);
 
     // Message batching: a burst of messages from the same contact is merged into ONE reply.
     // Window = silence after the last message (random between min/max, hard-capped).
@@ -278,6 +283,22 @@ export class WhatsAppGateway {
     this.saveTriggers();
   }
 
+  // Verifica se o contato possui diretriz temporária ativa (TTL válido)
+  hasActiveDirective(contactName) {
+    const key = this.normalizeContact(contactName);
+    const profile = this.contacts[key] || this.contacts[contactName];
+    const td = profile?.transientDirective;
+    if (!td || !td.directive || !td.expiresAt) return false;
+    const exp = new Date(td.expiresAt);
+    return !isNaN(exp.getTime()) && new Date() < exp;
+  }
+
+  // Identifica perguntas de risco sobre agenda física, compromissos ou horários
+  isRiskQuestion(text) {
+    const RISK_RE = /(que horas|onde\s+(?:tu|voc[eê]|vc)\s+t[aá]|vai\s+vir|vem\s+aqui|fez\s+o\s+contrato|quando\s+vai|vai\s+l[aá]|vai\s+passar)/i;
+    return RISK_RE.test(String(text || ''));
+  }
+
   // online_hours "HH:MM-HH:MM" from data/SOUL.md (fallback: config.onlineHours / 08-23)
   getOnlineHours() {
     let start = (this.appConfig.onlineHours?.start ?? 8) * 60;
@@ -351,6 +372,7 @@ export class WhatsAppGateway {
   // Main message handler
   async handleMessage(msg) {
     if (!msg.message) return;
+    if (msg.key?.id && this.sentIds.has(msg.key.id)) return;
 
     const jid = msg.key.remoteJid || '';
     const isBroadcast = jid === 'status@broadcast' || jid.endsWith('@newsletter') || jid.endsWith('@broadcast');
@@ -384,6 +406,24 @@ export class WhatsAppGateway {
 
     // 1. Skip system events
     if (SYSTEM_EVENT_RE.test(text.trim())) return;
+
+    // === INTERCEPTAÇÃO EXCLUSIVA DO SELF-CHAT (PAINEL DE CONTROLE v1.4.0) ===
+    const senderJid = msg.key.remoteJid || '';
+    const ownerNumFromSock = this.sock?.user?.id ? this.sock.user.id.split('@')[0].split(':')[0] : null;
+    if (ownerNumFromSock && !this.sessionOwnerNumber) {
+      this.sessionOwnerNumber = ownerNumFromSock;
+    }
+    const effectiveOwnerNum = this.sessionOwnerNumber || ownerNumFromSock;
+    const isSelfChat = senderJid === this.sock?.user?.id ||
+                       (this.sock?.user?.lid && senderJid === this.sock.user.lid) ||
+                       (Boolean(effectiveOwnerNum) && senderJid?.split('@')[0]?.split(':')[0] === effectiveOwnerNum);
+
+    if (isSelfChat) {
+      if (this.adminController && typeof this.adminController.handleCommand === 'function') {
+        await this.adminController.handleCommand(text, msg);
+      }
+      return;
+    }
 
     const isGroup = jid.endsWith('@g.us');
 
@@ -502,6 +542,15 @@ export class WhatsAppGateway {
 
     // 5. Activated chat without profile (e.g. activated while the process was down): JIT now
     await this.ensureProfile(normalizedSender);
+
+    // Human-in-the-Loop para Perguntas de Risco (Horários e Compromissos)
+    if (this.isRiskQuestion(processedText) && !this.hasActiveDirective(normalizedSender)) {
+      if (this.adminController && typeof this.adminController.notifyRiskQuestion === 'function') {
+        this.adminController.notifyRiskQuestion(normalizedSender, processedText).catch((err) => {
+          console.log(chalk.yellow('   [ADMIN] Erro ao notificar pergunta de risco: ' + err.message));
+        });
+      }
+    }
 
     // 6. Generate and send reply
     await this.queueReply(normalizedSender, processedText, msg);
@@ -774,6 +823,7 @@ export class WhatsAppGateway {
       rules: profile.rules || '',
       formality: profile.formality,
       closeness: profile.closeness || 'normal',
+      transientDirective: profile.transientDirective,
       // Chat explicitly activated by the owner (" ."): guard/review-queue never block the send
       autoSend: true
     };
@@ -980,6 +1030,9 @@ export class WhatsAppGateway {
       if (connection === 'open') {
         console.log(chalk.green('\u2705 WhatsApp conectado!'));
         console.log(chalk.gray('  Escuta passiva ativa - respostas somente em chats ativados com " ."'));
+        if (this.sock?.user?.id) {
+          this.sessionOwnerNumber = this.sock.user.id.split('@')[0].split(':')[0];
+        }
       }
 
       if (connection === 'close') {

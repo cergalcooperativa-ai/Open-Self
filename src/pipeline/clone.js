@@ -138,9 +138,20 @@ export class ClonePipeline {
   buildSystemPrompt(contact, recentContext, ragContext) {
     const contactName = contact.name || 'Contato';
     const relationship = contact.relationship || 'desconhecido';
-    const rules = contact.rules || 'Seja natural, breve e educado.';
+    let rules = contact.rules || 'Seja natural, breve e educado.';
     const soulContent = this.loadSoul();
     const ownerName = contact.ownerName || this.config.ownerName || this.ownerName || this.getOwnerNameFromSoul(soulContent) || 'Operador';
+
+    // Injeção de Diretriz Temporária no Pipeline (v1.4.0)
+    if (contact.transientDirective?.directive && contact.transientDirective?.expiresAt) {
+      const expiresAt = new Date(contact.transientDirective.expiresAt);
+      if (!isNaN(expiresAt.getTime()) && new Date() < expiresAt) {
+        const directiveBlock = `🎯 OBJETIVO ATUAL DEFINIDO PELO OPERADOR PARA ESTA CONVERSA:
+"${contact.transientDirective.directive}"
+Conduza o diálogo com naturalidade e brevidade para atingir esse objetivo, sem quebrar o sotaque e o disfarce.`;
+        rules = `${directiveBlock}\n\n${rules}`;
+      }
+    }
 
     const identityIntro = `Você é ${ownerName}, respondendo mensagens no WhatsApp como você mesmo.\nVocê está conversando no WhatsApp com ${contactName} (${relationship}).`;
 
@@ -160,6 +171,10 @@ INSTRUÇÃO: Escreva apenas a sua resposta exata em UMA mensagem natural e human
   }
 
   generateFallback(text, contact) {
+    const RISK_RE = /(que horas|onde\s+(?:tu|voc[eê]|vc)\s+t[aá]|vai\s+vir|vem\s+aqui|fez\s+o\s+contrato|quando\s+vai|vai\s+l[aá]|vai\s+passar)/i;
+    if (RISK_RE.test(String(text || ''))) {
+      return "to na correria aqui na rua, mais tarde te confirmo certinho";
+    }
     const fallbacks = [
       "tá bom",
       "entendi",

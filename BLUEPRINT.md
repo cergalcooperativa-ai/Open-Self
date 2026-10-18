@@ -4,7 +4,7 @@
 > Este documento contém a especificação exata, arquitetural, algorítmica e operacional para permitir que qualquer agente autônomo ou desenvolvedor reconstrua o **Open-Self** do zero absoluto, obtendo 100% de paridade comportamental, técnica e de segurança com a versão ativa em produção.
 >
 > **Última Atualização:** 2026-10-18  
-> **Status:** Produção Ativa (Daemon Systemd permanente, Open-Self v1.3.0, Node.js v22.x, 718 testes / 75 arquivos aprovados)
+> **Status:** Produção Ativa (Daemon Systemd permanente, Open-Self v1.4.0, Node.js v22.x, 735 testes / 76 arquivos aprovados)
 >
 > **Revisão verificada contra produção:** 2026-10-18 — estado real cruzado com systemctl, npm test e data/*.json (seção 9). Protocolo de manutenção: seção 10.
 
@@ -46,14 +46,21 @@ O **Open-Self** é um clone digital de personalidade humana para WhatsApp basead
 flowchart TD
     WA[WhatsApp Network] -->|Baileys Socket messages.upsert| HM[handleMessage]
     
-    HM --> IsSys{Evento de Sistema?}
-    IsSys -- Sim --> Drop[Descartar]
-    IsSys -- Não --> Who{msg.key.fromMe?}
+    HM --> EchoCheck{ID em sentIds?}
+    EchoCheck -- Sim --> Drop[Descartar Eco]
+    EchoCheck -- Não --> IsSys{Evento de Sistema?}
+    IsSys -- Sim --> Drop
+    IsSys -- Não --> SelfChatCheck{É conversa consigo mesmo? isSelfChat}
     
-    %% Fluxo do Dono (Operador)
-    Who -- Sim (Dono) --> EchoCheck{ID em sentIds?}
-    EchoCheck -- Sim --> Drop
-    EchoCheck -- Não --> GroupCheck{Grupo ou Broadcast?}
+    %% Fluxo de Controle Exclusivo do Self-Chat
+    SelfChatCheck -- Sim --> AdminCtrl[AdminController.handleCommand: /instruir, /pendencias, /status, /responder]
+    AdminCtrl --> SelfReply[sock.sendMessage no Self-Chat: ID gravado em sentIds]
+    
+    %% Fluxo Normal de Mensagens
+    SelfChatCheck -- Não --> Who{msg.key.fromMe?}
+    
+    %% Fluxo do Dono (Operador em chats normais)
+    Who -- Sim (Dono) --> GroupCheck{Grupo ou Broadcast?}
     GroupCheck -- Sim --> Drop
     GroupCheck -- Não --> PT[processTriggers: . ou , exclusivo do dono 1:1]
     PT --> ActionCheck{Gatilho Detectado?}
@@ -78,7 +85,10 @@ flowchart TD
     KillSwitch -- Não --> TrigActive{trigger-states.json == true?}
     TrigActive -- Não --> DropStats
     TrigActive -- Sim --> EnsureProf[ensureProfile: Carrega perfil JIT ou cria]
-    EnsureProf --> QReply[queueReply: Buffer de Rajada / Batch]
+    EnsureProf --> RiskCheck{Pergunta de Risco && Sem Diretriz?}
+    RiskCheck -- Sim --> AlertSelf[AdminController.notifyRiskQuestion: Alerta no Self-Chat]
+    AlertSelf --> QReply[queueReply: Buffer de Rajada / Batch]
+    RiskCheck -- Não --> QReply
     
     %% Batch & Envio
     QReply --> Timer[Timer de Silêncio: 5s a 9s]
@@ -135,9 +145,10 @@ Open-Self/
     │   ├── start.js                    # Inicializador de gateways
     │   └── utils/error-handler.js      # Tratamento central de erros do CLI
     ├── gateway/
-    │   └── whatsapp.js                 # Gateway Baileys, reconexão, batch, JIT, áudio Whisper e heartbeat
+    │   ├── whatsapp.js                 # Gateway Baileys, reconexão, batch, JIT, áudio Whisper e heartbeat
+    │   └── admin-controller.js         # Painel de Controle via Self-Chat (/instruir, /pendencias, /status, /responder)
     ├── pipeline/
-    │   └── clone.js                    # Orquestrador do clone, montagem de prompt e RAG
+    │   └── clone.js                    # Orquestrador do clone, montagem de prompt, RAG e injeção de diretrizes
     ├── memory/
     │   ├── conversation.js             # ConversationMemory (curto prazo, resolveBatch)
     │   └── rag.js                      # ChatMemory (banco vetorial local Bag-of-Words)
@@ -330,9 +341,80 @@ if (this.chatMemory) {
 }
 ```
 
+#### 5.2.5 Injeção de Diretrizes Temporárias no Pipeline (`transientDirective`)
+Em `buildSystemPrompt()`, o pipeline verifica se o contato possui uma diretriz ativa e não expirada (`new Date() < new Date(contact.transientDirective.expiresAt)`):
+```javascript
+if (contact.transientDirective?.directive && contact.transientDirective?.expiresAt) {
+  const expiresAt = new Date(contact.transientDirective.expiresAt);
+  if (!isNaN(expiresAt.getTime()) && new Date() < expiresAt) {
+    const directiveBlock = `🎯 OBJETIVO ATUAL DEFINIDO PELO OPERADOR PARA ESTA CONVERSA:
+"${contact.transientDirective.directive}"
+Conduza o diálogo com naturalidade e brevidade para atingir esse objetivo, sem quebrar o sotaque e o disfarce.`;
+    rules = `${directiveBlock}\n\n${rules}`;
+  }
+}
+```
+A diretriz é injetada no topo das regras do contato, orientando a tomada de decisão do clone na conversa sem quebrar o sotaque ou a persona.
+
 ---
 
-### 5.3 Banco Vetorial Local RAG (`src/memory/rag.js`)
+### 5.3 Painel de Controle via WhatsApp Self-Chat (`src/gateway/admin-controller.js`) (v1.4.0)
+Permite que o titular controle, instrua e audite o clone em tempo real sem sair do WhatsApp, interagindo exclusivamente através do chat consigo mesmo (Self-Chat).
+
+#### 5.3.1 Interceptação e Isolamento Absoluto do Self-Chat
+No início do método `handleMessage()`, o gateway verifica se a mensagem é proveniente da conversa do próprio titular (`isSelfChat`):
+```javascript
+const senderJid = msg.key.remoteJid || '';
+const ownerNumFromSock = this.sock?.user?.id ? this.sock.user.id.split('@')[0].split(':')[0] : null;
+const effectiveOwnerNum = this.sessionOwnerNumber || ownerNumFromSock;
+const isSelfChat = senderJid === this.sock?.user?.id ||
+                   (this.sock?.user?.lid && senderJid === this.sock.user.lid) ||
+                   (Boolean(effectiveOwnerNum) && senderJid?.split('@')[0]?.split(':')[0] === effectiveOwnerNum);
+
+if (isSelfChat) {
+  await this.adminController.handleCommand(text, msg);
+  return;
+}
+```
+**Regra de Isolamento Absoluto:**
+* **NÃO** salva em RAG (`chatMemory`).
+* **NÃO** grava como histórico de conversa (`conversationMemory`).
+* **NÃO** aciona os gatilhos normais (` .` ou ` ,`).
+* Encaminha o comando diretamente ao `AdminController` e encerra a execução com `return`.
+* **Anti-Loop de Ecos:** Todas as respostas enviadas pelo bot no Self-Chat via `sock.sendMessage()` têm seus IDs gravados em `sentIds`. No início do `handleMessage()`, qualquer mensagem cujo ID conste em `sentIds` é imediatamente descartada.
+
+#### 5.3.2 Comandos Operacionais Implementados
+1. **/instruir [Contato] [diretriz]:**
+   * Salva no perfil do contato em `data/contacts.json` uma diretriz temporária com TTL de 24 horas (`createdAt` e `expiresAt`).
+   * Resposta do bot: `✅ Diretriz gravada para [Contato]. O clone seguirá este objetivo nas próximas respostas.`
+2. **/pendencias ou /resumo:**
+   * Lê `data/conversation-sessions.json`, localiza contatos com última mensagem `[PENDING_REPLY]` sem resposta do titular, cruza com `data/trigger-states.json` e gera o relatório consolidado:
+   ```plaintext
+   📋 CONVERSAS PENDENTES:
+   • Levi: "Consegue me passar os valores hoje?" (14:32) [Gatilho: ATIVO]
+   • Diana: "Tais em casa neh ?" (15:10) [Gatilho: INATIVO]
+   ```
+3. **/status:**
+   * Retorna uptime do daemon (`h m s`), consumo de memória (`RSS em MB`), integridade do socket (`Conectado / Desconectado`) e lista de contatos atualmente com gatilho ativo (`true`).
+4. **/responder [Contato] [orientação]:**
+   * Resposta assistida (Human-in-the-Loop): grava a orientação no perfil com TTL de 1 hora e, caso haja mensagens represadas no buffer (`_pending`), força o envio imediato via `_flushPending()`.
+5. **/ajuda:**
+   * Exibe o menu com todos os comandos disponíveis no painel.
+
+#### 5.3.3 Tratamento Human-in-the-Loop para Perguntas de Risco
+Nas perguntas em que o clone não possui como deduzir a agenda física real do operador (detectadas por termos como `que horas`, `onde tu tá`, `vai vir`, `vem aqui`, `fez o contrato`, `quando vai`, `vai passar`):
+* **Com Diretriz Ativa:** O clone responde aplicando diretamente o objetivo pré-configurado.
+* **Sem Diretriz Ativa:**
+  * O bot despacha imediatamente um alerta no Self-Chat:
+    `⚠️ [Pergunta de Risco - ${contactName}]: "${text}"`
+    `Responda: "/responder ${contactName} [sua orientação]"`
+  * O buffer segura o envio durante o tempo de silêncio (`batchMaxMs`).
+  * Se o titular enviar `/responder [Nome] [orientação]`, a resposta é enviada imediatamente seguindo a instrução.
+  * Se o titular não responder a tempo, o clone utiliza o Fallback de Deflexão do SOUL.md (`"to na correria aqui na rua, mais tarde te confirmo certinho"`), jamais inventando locais ou horários.
+
+---
+
+### 5.4 Banco Vetorial Local RAG (`src/memory/rag.js`)
 O `ChatMemory` implementa busca semântica léxica leve sem dependências pesadas de C++:
 * **Algoritmo:** Vetorização Term-Frequency (TF) Bag-of-Words normalizada por norma Euclidiana ($L_2$).
 * **Similaridade:** Cosseno do ângulo entre o vetor da query e os vetores armazenados em `data/memory-index/vectors.json`.
@@ -341,7 +423,7 @@ O `ChatMemory` implementa busca semântica léxica leve sem dependências pesada
 
 ---
 
-### 5.4 Filtro Ativo Anti-Detecção (`src/safety/ai-detection.js`)
+### 5.5 Filtro Ativo Anti-Detecção (`src/safety/ai-detection.js`)
 Além da checagem de revelações de IA em múltiplos idiomas, a função `cleanAIReveal` atua como filtro de higienização de saída antes da transmissão:
 ```javascript
 const cleanPatterns = [
@@ -535,7 +617,7 @@ echo "[]" > data/memory-index/vectors.json
 Certifique-se de que todos os testes passem:
 ```bash
 npm test
-# Resultado esperado: 75 test files passed, 718 tests passed
+# Resultado esperado: 76 test files passed, 735 tests passed
 ```
 
 ### Passo 6: Inicialização e Pareamento WhatsApp
@@ -588,12 +670,14 @@ Pronto! A ferramenta estará 100% reconstruída, segura, autônoma e idêntica �
 
 ---
 
-## 9. Estado de Produção Verificado (snapshot gerado ao vivo: 2026-10-18 05:52 -03)
+## 9. Estado de Produção Verificado (snapshot gerado ao vivo: 2026-10-18 06:55 -03)
 
 | Item | Estado real |
 |---|---|
-| Serviço systemd | `active` (running) / enabled=enabled, PID 61012, cgroup `system.slice/openself-gateway.service` |
-| Gateway | `node src/cli/index.js start --whatsapp` (v1.3.0, unidade `/etc/systemd/system/openself-gateway.service`) |
+| Serviço systemd | `active` (running) / enabled=enabled, cgroup `system.slice/openself-gateway.service` |
+| Gateway | `node src/cli/index.js start --whatsapp` (v1.4.0, unidade `/etc/systemd/system/openself-gateway.service`) |
+| Painel de Controle (Self-Chat) | Ativo via `AdminController` (`/instruir`, `/pendencias`, `/status`, `/responder`) com isolamento RAG total |
+| Human-in-the-Loop (Risco) | Detecção de perguntas de tempo real com retenção em buffer, alertas no Self-Chat e fallback de deflexão |
 | Sessão WhatsApp | me=`554899036346:20@s.whatsapp.net`, LID=`19796259246217:20@lid`, socket TLS conectado |
 | Gatilhos (trigger-states.json) | `{"Johnny Teste": true, "Diana": false}` |
 | Contatos com perfil isolado | Neia (2241 msgs); Tayla Moreno dos Santos (103 msgs); Edlayne (395 msgs); Johnny Teste (0 msgs); Levi (18 msgs); Diana (8 msgs) |
@@ -602,7 +686,7 @@ Pronto! A ferramenta estará 100% reconstruída, segura, autônoma e idêntica �
 | Escuta Passiva Universal | Ativa em 100% dos chats (texto e áudio) antes de qualquer checagem de gatilho ou horário |
 | Heartbeat & Cooldown | Ativo em `data/heartbeat.json`, gravado automaticamente a cada mensagem do dono (`fromMe: true`) com cooldown de 3 minutos |
 | Personalidade base | 263 mensagens analisadas (`personality.json`); `SOUL.auto.md` rascunho PT 63% / ES 26% |
-| Testes Automatizados | 718/718 passando (75 arquivos aprovados com 100% de sucesso) — verificado 2026-10-18 |
+| Testes Automatizados | 735/735 passando (76 arquivos aprovados com 100% de sucesso) — verificado 2026-10-18 |
 | Legacy | `personaclone.service` = inactive (Digital-Personality-Clone descontinuado; Open-Self é o sucessor) |
 
 Últimas linhas do log de produção:
