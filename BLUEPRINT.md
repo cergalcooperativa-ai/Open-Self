@@ -241,12 +241,16 @@ async learnFromSelf(contactName, text) {
 ```
 
 #### 5.1.4 Transcrição Automática de Áudios (Whisper na Groq)
-O gateway intercepta mensagens contendo notas de voz ou arquivos de áudio (`msg.message?.audioMessage` ou em mensagens temporárias/efêmeras) através do método `downloadMediaMessage` do Baileys:
+O gateway intercepta mensagens contendo notas de voz ou arquivos de áudio através do método `downloadMediaMessage` do Baileys com suporte transparente e multimodal aos seguintes formatos:
+* **Áudios Diretos:** `msg.message?.audioMessage` (tanto notas de voz PTT quanto arquivos de áudio gravados).
+* **Mensagens Efêmeras / Temporárias:** `msg.message?.ephemeralMessage?.message?.audioMessage`.
+* **Mensagens de Visualização Única ("Ouvir uma vez"):** `msg.message?.viewOnceMessage?.message?.audioMessage` e `msg.message?.viewOnceMessageV2?.message?.audioMessage`.
 * **Endpoint de Transcrição:** Utiliza o cliente oficial OpenAI conectado à infraestrutura Groq (`whisper-large-v3-turbo`) através das variáveis de ambiente `OPENAI_BASE_URL` (`https://api.groq.com/openai/v1`) e `OPENAI_API_KEY`.
 * **Formato e Conversão:** Converte o buffer de áudio em arquivo Ogg (`toFile(audioBuffer, 'audio.ogg', { type: 'audio/ogg' })`) e despacha para a API de transcrição.
-* **Isolamento e Paridade Textual:** O texto transcrito substitui a mensagem de áudio e é processado como texto comum:
-  * Se enviado por terceiros, é indexado no RAG isolado do contato e adicionado à memória de curto prazo sem prefixos artificiais (ex: sem tags como `[áudio]`).
+* **Isolamento e Paridade Textual:** O texto transcrito substitui a mensagem de áudio e é processado exatamente como texto comum:
+  * Se enviado por terceiros, é indexado no RAG isolado do contato e adicionado à memória de curto prazo sem prefixos artificiais (sem tags como `[áudio]`).
   * Se enviado pelo próprio operador (`fromMe === true`), é registrado através de `learnFromSelf()`, ensinando o clone o vocabulário e o estilo falado do titular.
+  * O aprendizado passivo universal opera em **todos os chats**, mesmo naqueles que não possuem ativação ativa via ` .`.
 
 #### 5.1.5 Atualização Ativa do Heartbeat e Cooldown de Operador (Ghost Mode Coerente)
 Para manter coerência no modo fantasma e evitar que o clone responda em paralelo enquanto o titular utiliza ativamente o WhatsApp:
@@ -531,7 +535,7 @@ echo "[]" > data/memory-index/vectors.json
 Certifique-se de que todos os testes passem:
 ```bash
 npm test
-# Resultado esperado: 75 test files passed, 714 tests passed
+# Resultado esperado: 75 test files passed, 718 tests passed
 ```
 
 ### Passo 6: Inicialização e Pareamento WhatsApp
@@ -584,28 +588,28 @@ Pronto! A ferramenta estará 100% reconstruída, segura, autônoma e idêntica �
 
 ---
 
-## 9. Estado de Produção Verificado (snapshot gerado ao vivo: 2026-10-17 21:38 -03)
+## 9. Estado de Produção Verificado (snapshot gerado ao vivo: 2026-10-18 05:52 -03)
 
 | Item | Estado real |
 |---|---|
-| Serviço systemd | `active` / enabled=enabled, PID 56852, uptime 1-04:44:07, cgroup `system.slice/openself-gateway.service` |
-| Gateway | `node src/cli/index.js start --whatsapp` (unit `/etc/systemd/system/openself-gateway.service`) |
-| Sessão WhatsApp | me=`554899036346:20@s.whatsapp.net`, registered=`False` (sessão funcional; backup preservado em `whatsapp-session.unreg.1791953900/`) |
-| Gatilhos (trigger-states.json) | `{
-  "Johnny Teste": true,
-  "Diana": false
-}` |
+| Serviço systemd | `active` (running) / enabled=enabled, PID 61012, cgroup `system.slice/openself-gateway.service` |
+| Gateway | `node src/cli/index.js start --whatsapp` (v1.3.0, unidade `/etc/systemd/system/openself-gateway.service`) |
+| Sessão WhatsApp | me=`554899036346:20@s.whatsapp.net`, LID=`19796259246217:20@lid`, socket TLS conectado |
+| Gatilhos (trigger-states.json) | `{"Johnny Teste": true, "Diana": false}` |
 | Contatos com perfil isolado | Neia (2241 msgs); Tayla Moreno dos Santos (103 msgs); Edlayne (395 msgs); Johnny Teste (0 msgs); Levi (18 msgs); Diana (8 msgs) |
 | LLM Brain | Groq `gpt-oss-120b` via endpoint compatível OpenAI (`OPENAI_BASE_URL=https://api.groq.com/openai/v1`) |
+| Transcrição de Áudio (Whisper) | Groq `whisper-large-v3-turbo` via OpenAI SDK — áudios diretos, efêmeros e visualização única transcritos com paridade textual |
+| Escuta Passiva Universal | Ativa em 100% dos chats (texto e áudio) antes de qualquer checagem de gatilho ou horário |
+| Heartbeat & Cooldown | Ativo em `data/heartbeat.json`, gravado automaticamente a cada mensagem do dono (`fromMe: true`) com cooldown de 3 minutos |
 | Personalidade base | 263 mensagens analisadas (`personality.json`); `SOUL.auto.md` rascunho PT 63% / ES 26% |
-| Testes | 714/714 passando (75 arquivos) — verificado 2026-10-16 |
+| Testes Automatizados | 718/718 passando (75 arquivos aprovados com 100% de sucesso) — verificado 2026-10-18 |
 | Legacy | `personaclone.service` = inactive (Digital-Personality-Clone descontinuado; Open-Self é o sucessor) |
-| Manutenção pendente | `heartbeat.json` stale (lastSeen 2026-10-11) — monitorar |
 
 Últimas linhas do log de produção:
 ```
-[LEARN] Mensagem de Diana salva (memoria + RAG isolado)
-   [LEARN] Mensagem de Diana salva (memoria + RAG isolado)
+✅ WhatsApp conectado!
+  Escuta passiva ativa - respostas somente em chats ativados com " ."
+{"level":30,"time":"2026-10-18T08:31:22.659Z","pid":61012,"hostname":"VM","class":"baileys","myPN":"554899036346:20@s.whatsapp.net","myLID":"19796259246217:20@lid","msg":"Own LID session created successfully"}
 ```
 
 ---

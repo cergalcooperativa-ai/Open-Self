@@ -360,8 +360,11 @@ export class WhatsAppGateway {
                  msg.message.extendedTextMessage?.text ||
                  msg.message.imageMessage?.caption || '';
 
-    // Interceptação automática de áudio via Whisper (Groq)
-    const audioMsg = msg.message.audioMessage || msg.message.ephemeralMessage?.message?.audioMessage;
+    // Interceptação automática de áudio via Whisper (Groq) — áudios diretos, efêmeros e visualização única
+    const audioMsg = msg.message.audioMessage ||
+                     msg.message.ephemeralMessage?.message?.audioMessage ||
+                     msg.message.viewOnceMessage?.message?.audioMessage ||
+                     msg.message.viewOnceMessageV2?.message?.audioMessage;
     if (audioMsg) {
       try {
         const downloadFn = this.downloadMediaMessage || downloadMediaMessage;
