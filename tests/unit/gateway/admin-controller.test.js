@@ -237,7 +237,7 @@ describe('AdminController — WhatsApp Self-Chat Control Panel (v1.4.0)', () => 
       gw.processTriggers = vi.fn();
 
       const selfMsg = {
-        key: { remoteJid: '554899999999@s.whatsapp.net', id: 'CMD_001' },
+        key: { remoteJid: '554899999999@s.whatsapp.net', id: 'CMD_001', fromMe: true },
         message: { conversation: '/status' }
       };
 
@@ -248,13 +248,31 @@ describe('AdminController — WhatsApp Self-Chat Control Panel (v1.4.0)', () => 
       expect(gw.processTriggers).not.toHaveBeenCalled();
     });
 
+    it('matches self-chat even with device suffix (:20) or LID', async () => {
+      const gw = new WhatsAppGateway({ dataDir: tmpDir, sessionOwnerNumber: '554899999999' });
+      gw.sock = {
+        user: { id: '554899999999:20@s.whatsapp.net', lid: '19796259246217:20@lid', name: 'Johnny' },
+        sendMessage: vi.fn(async () => ({ key: { id: 'REPLY_123' } }))
+      };
+      gw.adminController.handleCommand = vi.fn(async () => {});
+
+      const selfLidMsg = {
+        key: { remoteJid: '19796259246217@lid', id: 'CMD_002', fromMe: true },
+        message: { conversation: '/status' }
+      };
+
+      await gw.handleMessage(selfLidMsg);
+
+      expect(gw.adminController.handleCommand).toHaveBeenCalledWith('/status', selfLidMsg);
+    });
+
     it('ignores echoes sent by the bot itself', async () => {
       const gw = new WhatsAppGateway({ dataDir: tmpDir, sessionOwnerNumber: '554899999999' });
       gw.sentIds.add('BOT_SENT_999');
       gw.adminController.handleCommand = vi.fn();
 
       const echoMsg = {
-        key: { remoteJid: '554899999999@s.whatsapp.net', id: 'BOT_SENT_999' },
+        key: { remoteJid: '554899999999@s.whatsapp.net', id: 'BOT_SENT_999', fromMe: true },
         message: { conversation: '✅ Diretriz gravada' }
       };
 

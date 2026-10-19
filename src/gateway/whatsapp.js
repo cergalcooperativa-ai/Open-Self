@@ -409,14 +409,35 @@ export class WhatsAppGateway {
 
     // === INTERCEPTAÇÃO EXCLUSIVA DO SELF-CHAT (PAINEL DE CONTROLE v1.4.0) ===
     const senderJid = msg.key.remoteJid || '';
-    const ownerNumFromSock = this.sock?.user?.id ? this.sock.user.id.split('@')[0].split(':')[0] : null;
-    if (ownerNumFromSock && !this.sessionOwnerNumber) {
-      this.sessionOwnerNumber = ownerNumFromSock;
+
+    // 1. Injeção de Telemetria (Debug Temporário)
+    if (text && text.startsWith('/')) {
+      console.log(chalk.yellow('[DEBUG SELF-CHAT] Tentativa de comando interceptada:'), {
+        comando: text,
+        fromMe: msg.key?.fromMe,
+        remoteJid: senderJid,
+        sockUserId: this.sock?.user?.id
+      });
     }
-    const effectiveOwnerNum = this.sessionOwnerNumber || ownerNumFromSock;
-    const isSelfChat = senderJid === this.sock?.user?.id ||
-                       (this.sock?.user?.lid && senderJid === this.sock.user.lid) ||
-                       (Boolean(effectiveOwnerNum) && senderJid?.split('@')[0]?.split(':')[0] === effectiveOwnerNum);
+
+    // 2. Refatoração Robusta da Lógica isSelfChat
+    const extractBaseNumber = (jid) => (jid ? String(jid).split('@')[0].split(':')[0] : null);
+
+    const remoteBase = extractBaseNumber(senderJid);
+    const sockBase = extractBaseNumber(this.sock?.user?.id);
+    const lidBase = extractBaseNumber(this.sock?.user?.lid);
+
+    if (sockBase && !this.sessionOwnerNumber) {
+      this.sessionOwnerNumber = sockBase;
+    }
+
+    // No Self-Chat do WhatsApp, a mensagem geralmente vem com fromMe === true 
+    // E o remoteBase é igual ao próprio número do dono (PN ou LID).
+    const isSelfChat = (msg.key?.fromMe === true || msg.key?.fromMe === undefined) && (
+      (remoteBase && sockBase && remoteBase === sockBase) ||
+      (remoteBase && lidBase && remoteBase === lidBase) ||
+      (this.sessionOwnerNumber && remoteBase === this.sessionOwnerNumber)
+    );
 
     if (isSelfChat) {
       if (this.adminController && typeof this.adminController.handleCommand === 'function') {
